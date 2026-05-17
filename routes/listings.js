@@ -1,0 +1,165 @@
+// routes/listings.js — Annonces transporteurs
+const express = require('express');
+const router  = express.Router();
+const db      = require('../config/database');
+const auth    = require('../middleware/auth');
+
+// ── GET /api/listings ────────────────────────
+router.get('/', async (req, res) => {
+  const { destination, type, zone, minKg, maxPrice, level, sort = 'rating' } = req.query;
+
+  let sql = `
+    SELECT l.*,
+      u.first_name, u.last_name, u.carrier_level, u.carrier_type,
+      u.total_trips, u.average_rating, u.country
+    FROM listings l
+    JOIN users u ON l.carrier_id = u.id
+    WHERE l.status = 'active' AND l.departure_date >= CURDATE()
+  `;
+  const params = [];
+
+  if (destination) { sql += ' AND l.destination LIKE ?'; params.push(`%${destination}%`); }
+  if (type)        { sql += ' AND l.type = ?';           params.push(type); }
+  if (zone)        { sql += ' AND l.zone = ?';           params.push(zone); }
+  if (minKg)       { sql += ' AND l.available_kg >= ?';  params.push(parseFloat(minKg)); }
+  if (maxPrice)    { sql += ' AND l.price_per_kg <= ?';  params.push(parseFloat(maxPrice)); }
+  if (level)       { sql += ' AND u.carrier_level = ?';  params.push(level); }
+
+  const orderMap = {
+    rating:     'u.average_rating DESC',
+    price_asc:  'l.price_per_kg ASC',
+    price_desc: 'l.price_per_kg DESC',
+    trips:      'u.total_trips DESC',
+    date:       'l.departure_date ASC',
+  };
+  sql += ` ORDER BY ${orderMap[sort] || orderMap.rating} LIMIT 50`;
+
+  try {
+    const [rows] = await db.execute(sql, params);
+    const listings = rows.map(r => ({
+      id:           r.id,
+      carrierId:    r.carrier_id,
+      carrierName:  `${r.first_name} ${r.last_name[0]}.`,
+      carrierLevel: r.carrier_level,
+      carrierTrips: r.total_trips,
+      carrierRating:parseFloat(r.average_rating) || 0,
+      from:         r.origin,
+      to:           r.destination,
+      countryFrom:  r.country_from,
+      countryTo:    r.country_to,
+      zone:         r.zone,
+      date:         r.departure_date,
+      kg:           parseFloat(r.available_kg),
+      price:        parseFloat(r.price_per_kg),
+      type:         r.type,
+      description:  r.description,
+      status:       r.status,
+    }));
+    res.json({ count: listings.length, listings });
+  } catch (err) {
+    console.error('Erreur listings:', err.message);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// ── GET /api/listings/:id ────────────────────
+router.get('/:id', async (req, res) => {
+  try {
+    const [rows] = await db.execute(`
+      SELECT l.*, u.first_name, u.last_name, u.carrier_level,
+             u.total_trips, u.average_rating, u.country, u.status AS carrier_status
+      FROM listings l JOIN users u ON l.carrier_id = u.id
+      WHERE l.id = ?
+    `, [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Annonce introuvable' });
+    const r = rows[0];
+    res.json({
+      id: r.id, carrierId: r.carrier_id,
+      carrierName: `${r.first_name} ${r.last_name[0]}.`,
+      carrierLevel: r.carrier_level, carrierTrips: r.total_trips,
+      carrierRating: parseFloat(r.average_rating) || 0,
+      from: r.origin, to: r.destination,
+      date: r.departure_date, kg: parseFloat(r.available_kg),
+      price: parseFloat(r.price_per_kg), type: r.type,
+      description: r.description, status: r.status,
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// ── POST /api/listings — Créer une annonce ───
+router.post('/', auth, async (req, res) => {
+  if (req.user.role !== 'carrier') {
+    return res.status(403).json({ error: 'Réservé aux transporteurs' });
+  }
+  const { origin, destination, countryFrom, countryTo, zone, departureDate, availableKg, pricePerKg, type, description } = req.body;
+  if (!origin || !destination || !departureDate || !availableKg || !pricePerKg) {
+    return res.status(400).json({ error: 'Champs obligatoires manquants' });
+  }
+  try {
+    const id = require('crypto').randomUUID();
+    await db.execute(`
+      INSERT INTO listings (id, carrier_id, origin, destination, country_from, country_to, zone, departure_date, available_kg, price_per_kg, type, description)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [id, req.user.id, origin, destination, countryFrom||null, countryTo||null, zone||'af', departureDate, parseFloat(availableKg), parseFloat(pricePerKg), type||'air', description||null]);
+
+    const [rows] = await db.execute('SELECT * FROM listings WHERE id = ?', [id]);
+    res.status(201).json({ success: true, listing: rows[0] });
+  } catch (err) {
+    console.error('Erreur create listing:', err.message);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// ── PATCH /api/listings/:id ──────────────────
+router.patch('/:id', auth, async (req, res) => {
+  const { availableKg, status, pricePerKg, description } = req.body;
+  try {
+    const [rows] = await db.execute('SELECT * FROM listings WHERE id = ? AND carrier_id = ?', [req.params.id, req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Annonce introuvable ou non autorisé' });
+
+    const updates = [];
+    const params  = [];
+    if (availableKg !== undefined) { updates.push('available_kg = ?');  params.push(parseFloat(availableKg)); }
+    if (status)                    { updates.push('status = ?');        params.push(status); }
+    if (pricePerKg)                { updates.push('price_per_kg = ?');  params.push(parseFloat(pricePerKg)); }
+    if (description !== undefined) { updates.push('description = ?');   params.push(description); }
+    if (!updates.length) return res.status(400).json({ error: 'Aucune donnée à mettre à jour' });
+
+    params.push(req.params.id);
+    await db.execute(`UPDATE listings SET ${updates.join(', ')} WHERE id = ?`, params);
+    const [updated] = await db.execute('SELECT * FROM listings WHERE id = ?', [req.params.id]);
+    res.json({ success: true, listing: updated[0] });
+  } catch (err) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// ── DELETE /api/listings/:id ─────────────────
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    const [rows] = await db.execute('SELECT id FROM listings WHERE id = ? AND carrier_id = ?', [req.params.id, req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Non autorisé' });
+    await db.execute('UPDATE listings SET status = ? WHERE id = ?', ['cancelled', req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// ── GET /api/listings/carrier/me ─────────────
+router.get('/carrier/me', auth, async (req, res) => {
+  if (req.user.role !== 'carrier') return res.status(403).json({ error: 'Non autorisé' });
+  try {
+    const [rows] = await db.execute(
+      'SELECT * FROM listings WHERE carrier_id = ? ORDER BY created_at DESC',
+      [req.user.id]
+    );
+    res.json({ listings: rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+module.exports = router;
