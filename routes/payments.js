@@ -71,6 +71,8 @@ router.post('/intent', auth, async (req, res) => {
       pi.id,
     ]);
 
+    console.log(`✅ Booking créé: ${bookingId} | listing: ${listingId} | client: ${req.user.id} | pi: ${pi.id}`);
+
     res.json({
       success: true,
       clientSecret: pi.client_secret,
@@ -119,7 +121,6 @@ router.post('/capture/:id', auth, async (req, res) => {
     }
     await stripe.paymentIntents.capture(booking.payment_intent_id);
     await db.execute('UPDATE bookings SET status = ? WHERE id = ?', ['completed', booking.id]);
-    // Incrémenter le compteur du transporteur
     await db.execute(
       'UPDATE users SET total_trips = total_trips + 1 WHERE id = ?',
       [booking.carrier_id]
@@ -172,6 +173,14 @@ router.post('/dispute/:id', auth, async (req, res) => {
 router.get('/bookings/me', auth, async (req, res) => {
   try {
     const field = req.user.role === 'carrier' ? 'carrier_id' : 'client_id';
+
+    // 🔍 DEBUG — voir ce qui est réellement en base
+    const [debug] = await db.execute(
+      'SELECT id, listing_id, client_id, carrier_id, status, payment_intent_id FROM bookings WHERE ?? = ?',
+      [field, req.user.id]
+    );
+    console.log(`🔍 DEBUG bookings (role=${req.user.role}, id=${req.user.id}):`, JSON.stringify(debug));
+
     const [rows] = await db.execute(`
       SELECT b.*, l.origin, l.destination, l.departure_date,
         u.first_name, u.last_name
@@ -181,8 +190,12 @@ router.get('/bookings/me', auth, async (req, res) => {
       WHERE b.${field} = ?
       ORDER BY b.created_at DESC
     `, [req.user.id]);
+
+    console.log(`📦 Résultat avec JOIN: ${rows.length} réservations`);
+
     res.json({ bookings: rows });
   } catch (err) {
+    console.error('Erreur bookings/me:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
