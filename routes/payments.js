@@ -71,7 +71,7 @@ router.post('/intent', auth, async (req, res) => {
       pi.id,
     ]);
 
-    console.log(`✅ Booking créé: ${bookingId} | listing: ${listingId} | client: ${req.user.id} | pi: ${pi.id}`);
+    console.log(`Booking created: ${bookingId} | listing: ${listingId} | client: ${req.user.id} | pi: ${pi.id}`);
 
     res.json({
       success: true,
