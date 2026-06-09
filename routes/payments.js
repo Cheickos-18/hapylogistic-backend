@@ -176,8 +176,8 @@ router.get('/bookings/me', auth, async (req, res) => {
 
     // 🔍 DEBUG — voir ce qui est réellement en base
     const [debug] = await db.execute(
-      'SELECT id, listing_id, client_id, carrier_id, status, payment_intent_id FROM bookings WHERE ?? = ?',
-      [field, req.user.id]
+      `SELECT id, listing_id, client_id, carrier_id, status, payment_intent_id FROM bookings WHERE ${field} = ?`,
+      [req.user.id]
     );
     console.log(`🔍 DEBUG bookings (role=${req.user.role}, id=${req.user.id}):`, JSON.stringify(debug));
 
