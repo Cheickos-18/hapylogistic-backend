@@ -16,7 +16,7 @@ const PORT = process.env.PORT || 3001;
 app.use(helmet({ contentSecurityPolicy: false }));
 
 // CORS — autorise le frontend Hostinger
-app.use(cors({
+const corsOptions = {
   origin: [
     process.env.FRONTEND_URL || 'https://hapylogistic.com',
     'http://localhost:3000',
@@ -25,7 +25,11 @@ app.use(cors({
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
-}));
+};
+app.use(cors(corsOptions));
+
+// Répondre immédiatement aux preflight OPTIONS (avant le rate limiter)
+app.options('*', cors(corsOptions));
 
 // Rate limiting
 app.set('trust proxy', 1);
