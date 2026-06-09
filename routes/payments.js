@@ -174,13 +174,6 @@ router.get('/bookings/me', auth, async (req, res) => {
   try {
     const field = req.user.role === 'carrier' ? 'carrier_id' : 'client_id';
 
-    // 🔍 DEBUG — voir ce qui est réellement en base
-    const [debug] = await db.execute(
-      `SELECT id, listing_id, client_id, carrier_id, status, payment_intent_id FROM bookings WHERE ${field} = ?`,
-      [req.user.id]
-    );
-    console.log(`🔍 DEBUG bookings (role=${req.user.role}, id=${req.user.id}):`, JSON.stringify(debug));
-
     const [rows] = await db.execute(`
       SELECT b.*, l.origin, l.destination, l.departure_date,
         u.first_name, u.last_name
@@ -191,7 +184,6 @@ router.get('/bookings/me', auth, async (req, res) => {
       ORDER BY b.created_at DESC
     `, [req.user.id]);
 
-    console.log(`📦 Résultat avec JOIN: ${rows.length} réservations`);
 
     res.json({ bookings: rows });
   } catch (err) {
