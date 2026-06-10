@@ -5,6 +5,11 @@ const db      = require('../config/database');
 const auth    = require('../middleware/auth');
 const { stripe, calculateFees } = require('../services/stripe');
 
+// ── Générer un code de collecte à 4 chiffres ─────────────────
+function generatePickupCode() {
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+
 // ── POST /api/payments/intent ────────────────
 router.post('/intent', auth, async (req, res) => {
   const { listingId, weightKg, parcelType, recipientName, recipientPhone, notes } = req.body;
@@ -48,14 +53,17 @@ router.post('/intent', auth, async (req, res) => {
 
     const pi = await stripe.paymentIntents.create(piParams);
 
-    const bookingId = require('crypto').randomUUID();
+    // Générer le code de collecte
+    const pickupCode = generatePickupCode();
+    const bookingId  = require('crypto').randomUUID();
+
     await db.execute(`
       INSERT INTO bookings
         (id, listing_id, client_id, carrier_id, weight_kg, parcel_type,
          recipient_name, recipient_phone, special_notes,
          base_amount, client_fee, carrier_fee, client_total, carrier_net, platform_fee,
-         payment_intent_id, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_payment')
+         payment_intent_id, pickup_code, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_payment')
     `, [
       bookingId, listingId, req.user.id, listing.carrier_id,
       parseFloat(weightKg), parcelType || null,
@@ -63,7 +71,7 @@ router.post('/intent', auth, async (req, res) => {
       base,
       amounts.clientFee  / 100, amounts.carrierFee / 100,
       amounts.clientTotal/ 100, amounts.carrierNet / 100, amounts.platformFee / 100,
-      pi.id,
+      pi.id, pickupCode,
     ]);
 
     await db.execute(
@@ -93,9 +101,62 @@ router.post('/intent', auth, async (req, res) => {
   }
 });
 
-// ── POST /api/payments/confirm-delivery/:id ──
+// ── GET /api/payments/bookings/:id/pickup-code ─────────────
+// Réservé au CLIENT — affiche le code de collecte
+router.get('/bookings/:id/pickup-code', auth, async (req, res) => {
+  try {
+    const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Réservation introuvable' });
+    const booking = rows[0];
+
+    if (booking.client_id !== req.user.id) {
+      return res.status(403).json({ error: 'Non autorisé' });
+    }
+    if (!['paid', 'in_transit'].includes(booking.status) && booking.status !== 'awaiting_payment') {
+      return res.status(400).json({ error: 'Code non disponible pour ce statut' });
+    }
+
+    res.json({ pickupCode: booking.pickup_code });
+  } catch (err) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// ── POST /api/payments/confirm-pickup/:id ────────────────────
+// Réservé au TRANSPORTEUR — soumet le code de collecte
+// Si correct → statut passe à 'in_transit'
+router.post('/confirm-pickup/:id', auth, async (req, res) => {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: 'Code requis' });
+
+  try {
+    const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Réservation introuvable' });
+    const booking = rows[0];
+
+    if (booking.carrier_id !== req.user.id) {
+      return res.status(403).json({ error: 'Réservé au transporteur' });
+    }
+    if (booking.status !== 'paid') {
+      return res.status(400).json({ error: 'La réservation doit être en statut payé' });
+    }
+    if (booking.pickup_code !== String(code).trim()) {
+      return res.status(400).json({ error: 'Code incorrect — vérifiez avec le client' });
+    }
+
+    await db.execute(
+      'UPDATE bookings SET status = ?, pickup_confirmed_at = NOW() WHERE id = ?',
+      ['in_transit', booking.id]
+    );
+    res.json({ success: true, message: 'Collecte confirmée — colis en transit ✅' });
+  } catch (err) {
+    console.error('Erreur confirm-pickup:', err.message);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// ── POST /api/payments/confirm-delivery/:id ──────────────────
 // Réservé au TRANSPORTEUR — marque le colis comme livré
-// Le paiement n'est PAS encore capturé — le client doit confirmer (ou 48h s'écoulent)
 router.post('/confirm-delivery/:id', auth, async (req, res) => {
   try {
     const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
@@ -120,9 +181,8 @@ router.post('/confirm-delivery/:id', auth, async (req, res) => {
   }
 });
 
-// ── POST /api/payments/confirm-receipt/:id ───
-// Réservé au CLIENT — confirme qu'il a bien reçu le colis
-// Déclenche immédiatement la capture Stripe → transporteur payé
+// ── POST /api/payments/confirm-receipt/:id ───────────────────
+// Réservé au CLIENT — confirme la réception → capture Stripe
 router.post('/confirm-receipt/:id', auth, async (req, res) => {
   try {
     const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
@@ -152,8 +212,8 @@ router.post('/confirm-receipt/:id', auth, async (req, res) => {
   }
 });
 
-// ── POST /api/payments/capture/:id ───────────
-// Appelé par le cron job (auto-libération 48h) — plus appelé par le frontend
+// ── POST /api/payments/capture/:id ───────────────────────────
+// Appelé par le cron job (auto-libération 48h)
 router.post('/capture/:id', auth, async (req, res) => {
   try {
     const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
@@ -177,7 +237,7 @@ router.post('/capture/:id', auth, async (req, res) => {
   }
 });
 
-// ── POST /api/payments/refund/:id ───────────
+// ── POST /api/payments/refund/:id ────────────────────────────
 router.post('/refund/:id', auth, async (req, res) => {
   const { reason, amount } = req.body;
   try {
@@ -213,7 +273,7 @@ router.post('/refund/:id', auth, async (req, res) => {
   }
 });
 
-// ── POST /api/payments/dispute/:id ──────────
+// ── POST /api/payments/dispute/:id ───────────────────────────
 router.post('/dispute/:id', auth, async (req, res) => {
   const { reason, description } = req.body;
   try {
@@ -233,7 +293,7 @@ router.post('/dispute/:id', auth, async (req, res) => {
   }
 });
 
-// ── GET /api/payments/bookings/received ─────
+// ── GET /api/payments/bookings/received ──────────────────────
 router.get('/bookings/received', auth, async (req, res) => {
   if (req.user.role !== 'carrier') {
     return res.status(403).json({ error: 'Réservé aux transporteurs' });
@@ -256,7 +316,7 @@ router.get('/bookings/received', auth, async (req, res) => {
   }
 });
 
-// ── GET /api/payments/bookings/me ───────────
+// ── GET /api/payments/bookings/me ────────────────────────────
 router.get('/bookings/me', auth, async (req, res) => {
   try {
     const field = req.user.role === 'carrier' ? 'carrier_id' : 'client_id';
