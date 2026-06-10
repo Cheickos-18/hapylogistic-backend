@@ -169,6 +169,31 @@ router.post('/dispute/:id', auth, async (req, res) => {
   }
 });
 
+
+// ── GET /api/bookings/received ───────────────
+// Réservations reçues par le transporteur connecté
+router.get('/bookings/received', auth, async (req, res) => {
+  if (req.user.role !== 'carrier') {
+    return res.status(403).json({ error: 'Réservé aux transporteurs' });
+  }
+  try {
+    const [rows] = await db.execute(`
+      SELECT b.*,
+        l.origin, l.destination, l.departure_date,
+        u.first_name, u.last_name, u.email AS client_email
+      FROM bookings b
+      JOIN listings l ON b.listing_id = l.id
+      JOIN users u ON u.id = b.client_id
+      WHERE b.carrier_id = ?
+      ORDER BY b.created_at DESC
+    `, [req.user.id]);
+    res.json({ bookings: rows });
+  } catch (err) {
+    console.error('Erreur bookings/received:', err.message);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
 // ── GET /api/payments/bookings/me ───────────
 router.get('/bookings/me', auth, async (req, res) => {
   try {
