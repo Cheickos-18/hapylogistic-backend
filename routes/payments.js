@@ -150,14 +150,37 @@ router.post('/refund/:id', auth, async (req, res) => {
     const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Réservation introuvable' });
     const booking = rows[0];
-    const refundParams = { payment_intent: booking.payment_intent_id, reason: reason || 'requested_by_customer' };
-    if (amount) refundParams.amount = Math.round(parseFloat(amount) * 100);
-    await stripe.refunds.create(refundParams);
+
+    // Vérifier que c'est bien le client qui annule
+    if (booking.client_id !== req.user.id) {
+      return res.status(403).json({ error: 'Non autorisé' });
+    }
+
+    // Récupérer le statut du PaymentIntent Stripe
+    const pi = await stripe.paymentIntents.retrieve(booking.payment_intent_id);
+
+    if (pi.status === 'requires_capture') {
+      // Paiement autorisé mais non capturé (escrow) → annuler directement
+      await stripe.paymentIntents.cancel(booking.payment_intent_id);
+    } else if (pi.status === 'succeeded') {
+      // Paiement déjà capturé → rembourser
+      const refundParams = { payment_intent: booking.payment_intent_id, reason: reason || 'requested_by_customer' };
+      if (amount) refundParams.amount = Math.round(parseFloat(amount) * 100);
+      await stripe.refunds.create(refundParams);
+    } else {
+      return res.status(400).json({ error: `Impossible d'annuler un paiement en statut: ${pi.status}` });
+    }
+
     await db.execute('UPDATE bookings SET status = ? WHERE id = ?', ['refunded', booking.id]);
-    res.json({ success: true, message: 'Remboursement effectué' });
+    // Restituer le stock
+    await db.execute(
+      'UPDATE listings SET available_kg = available_kg + ?, status = ? WHERE id = ?',
+      [parseFloat(booking.weight_kg), 'active', booking.listing_id]
+    );
+    res.json({ success: true, message: 'Réservation annulée — remboursement en cours' });
   } catch (err) {
     console.error('Erreur refund:', err.message);
-    res.status(500).json({ error: 'Erreur lors du remboursement' });
+    res.status(500).json({ error: 'Erreur lors du remboursement: ' + err.message });
   }
 });
 
