@@ -3,6 +3,30 @@ const express = require('express');
 const router  = express.Router();
 const db      = require('../config/database');
 const auth    = require('../middleware/auth');
+const { stripe } = require('../services/stripe');
+
+// ── Helper : rembourser toutes les réservations paid d'une annonce ──
+async function refundListingBookings(listingId, reason) {
+  const [bookings] = await db.execute(
+    "SELECT * FROM bookings WHERE listing_id = ? AND status = 'paid'",
+    [listingId]
+  );
+  for (const booking of bookings) {
+    try {
+      const pi = await stripe.paymentIntents.retrieve(booking.payment_intent_id);
+      if (pi.status === 'requires_capture') {
+        await stripe.paymentIntents.cancel(booking.payment_intent_id);
+      } else if (pi.status === 'succeeded') {
+        await stripe.refunds.create({ payment_intent: booking.payment_intent_id, reason: 'requested_by_customer' });
+      }
+      await db.execute("UPDATE bookings SET status = 'refunded' WHERE id = ?", [booking.id]);
+      console.log(`Auto-refund booking ${booking.id} — reason: ${reason}`);
+    } catch(e) {
+      console.error(`Erreur refund booking ${booking.id}:`, e.message);
+    }
+  }
+  return bookings.length;
+}
 
 // ── GET /api/listings ────────────────────────
 router.get('/', async (req, res) => {
@@ -118,6 +142,18 @@ router.patch('/:id', auth, async (req, res) => {
   try {
     const [rows] = await db.execute('SELECT * FROM listings WHERE id = ? AND carrier_id = ?', [req.params.id, req.user.id]);
     if (!rows.length) return res.status(404).json({ error: 'Annonce introuvable ou non autorisé' });
+    const listing = rows[0];
+
+    // Si le transporteur met en pause → rembourser les réservations paid
+    let refundedBookings = 0;
+    if (status && status === 'inactive' && listing.status === 'active') {
+      refundedBookings = await refundListingBookings(req.params.id, 'listing_paused');
+    }
+
+    // Si le prix augmente de plus de 20% → rembourser les réservations paid
+    if (pricePerKg && parseFloat(pricePerKg) > parseFloat(listing.price_per_kg) * 1.2) {
+      refundedBookings = await refundListingBookings(req.params.id, 'price_increase');
+    }
 
     const updates = [];
     const params  = [];
@@ -130,8 +166,9 @@ router.patch('/:id', auth, async (req, res) => {
     params.push(req.params.id);
     await db.execute(`UPDATE listings SET ${updates.join(', ')} WHERE id = ?`, params);
     const [updated] = await db.execute('SELECT * FROM listings WHERE id = ?', [req.params.id]);
-    res.json({ success: true, listing: updated[0] });
+    res.json({ success: true, listing: updated[0], refundedBookings });
   } catch (err) {
+    console.error('Erreur patch listing:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
@@ -139,11 +176,16 @@ router.patch('/:id', auth, async (req, res) => {
 // ── DELETE /api/listings/:id ─────────────────
 router.delete('/:id', auth, async (req, res) => {
   try {
-    const [rows] = await db.execute('SELECT id FROM listings WHERE id = ? AND carrier_id = ?', [req.params.id, req.user.id]);
+    const [rows] = await db.execute('SELECT * FROM listings WHERE id = ? AND carrier_id = ?', [req.params.id, req.user.id]);
     if (!rows.length) return res.status(404).json({ error: 'Non autorisé' });
+
+    // Rembourser automatiquement toutes les réservations paid
+    const refundCount = await refundListingBookings(req.params.id, 'listing_deleted');
+
     await db.execute('UPDATE listings SET status = ? WHERE id = ?', ['cancelled', req.params.id]);
-    res.json({ success: true });
+    res.json({ success: true, refundedBookings: refundCount });
   } catch (err) {
+    console.error('Erreur delete listing:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
