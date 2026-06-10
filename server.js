@@ -8,6 +8,8 @@ const express   = require('express');
 const cors      = require('cors');
 const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
+const cron      = require('node-cron');
+const autoCaptureDeliveries = require('./cron/autoCaptureDeliveries');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -76,6 +78,7 @@ app.get('/', (req, res) => {
       'POST /api/listings',
       'POST /api/payments/intent',
       'POST /api/payments/confirm-delivery/:id',
+      'POST /api/payments/confirm-receipt/:id',
       'POST /api/payments/capture/:id',
       'GET  /api/payments/bookings/me',
       'POST /api/reviews',
@@ -105,6 +108,12 @@ app.listen(PORT, () => {
   ║   Health  : http://localhost:${PORT}/health ║
   ╚══════════════════════════════════════╝
   `);
+
+  // ── Cron : auto-capture des livraisons après 48h sans confirmation client ──
+  cron.schedule('0 * * * *', () => {
+    autoCaptureDeliveries();
+  });
+  console.log('[Cron] AutoCapture livraisons programmé (toutes les heures)');
 });
 
 module.exports = app;
