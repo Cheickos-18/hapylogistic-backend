@@ -29,12 +29,11 @@ router.post('/intent', auth, async (req, res) => {
     const base    = parseFloat(listing.price_per_kg) * parseFloat(weightKg);
     const amounts = calculateFees(base);
 
-    // Créer PaymentIntent en mode escrow (capture_method: manual)
     const piParams = {
-      amount:   amounts.clientTotal,
-      currency: 'eur',
+      amount:         amounts.clientTotal,
+      currency:       'eur',
       capture_method: 'manual',
-      description: `HapyLogistic — ${listing.origin} → ${listing.destination} · ${weightKg}kg`,
+      description:    `HapyLogistic — ${listing.origin} → ${listing.destination} · ${weightKg}kg`,
       metadata: {
         listingId, clientId: req.user.id, carrierId: listing.carrier_id,
         weightKg: String(weightKg), baseAmount: String(base),
@@ -43,16 +42,12 @@ router.post('/intent', auth, async (req, res) => {
 
     if (client.stripe_customer_id) piParams.customer = client.stripe_customer_id;
     if (listing.stripe_account_id) {
-      piParams.transfer_data = {
-        destination: listing.stripe_account_id,
-        amount: amounts.carrierNet,
-      };
+      piParams.transfer_data        = { destination: listing.stripe_account_id, amount: amounts.carrierNet };
       piParams.application_fee_amount = amounts.platformFee;
     }
 
     const pi = await stripe.paymentIntents.create(piParams);
 
-    // Créer la réservation en DB
     const bookingId = require('crypto').randomUUID();
     await db.execute(`
       INSERT INTO bookings
@@ -66,33 +61,29 @@ router.post('/intent', auth, async (req, res) => {
       parseFloat(weightKg), parcelType || null,
       recipientName || null, recipientPhone || null, notes || null,
       base,
-      amounts.clientFee / 100, amounts.carrierFee / 100,
-      amounts.clientTotal / 100, amounts.carrierNet / 100, amounts.platformFee / 100,
+      amounts.clientFee  / 100, amounts.carrierFee / 100,
+      amounts.clientTotal/ 100, amounts.carrierNet / 100, amounts.platformFee / 100,
       pi.id,
     ]);
 
-    // Décrémenter le stock disponible
     await db.execute(
       'UPDATE listings SET available_kg = available_kg - ? WHERE id = ?',
       [parseFloat(weightKg), listingId]
     );
-    // Désactiver l'annonce si stock épuisé
     await db.execute(
       "UPDATE listings SET status = 'inactive' WHERE id = ? AND available_kg <= 0",
       [listingId]
     );
-
-    console.log(`Booking created: ${bookingId} | listing: ${listingId} | client: ${req.user.id} | pi: ${pi.id}`);
 
     res.json({
       success: true,
       clientSecret: pi.client_secret,
       bookingId,
       amounts: {
-        base:        (amounts.base       / 100).toFixed(2),
-        clientFee:   (amounts.clientFee  / 100).toFixed(2),
-        total:       (amounts.clientTotal/ 100).toFixed(2),
-        carrierGets: (amounts.carrierNet / 100).toFixed(2),
+        base:        (amounts.base        / 100).toFixed(2),
+        clientFee:   (amounts.clientFee   / 100).toFixed(2),
+        total:       (amounts.clientTotal / 100).toFixed(2),
+        carrierGets: (amounts.carrierNet  / 100).toFixed(2),
       }
     });
 
@@ -103,33 +94,76 @@ router.post('/intent', auth, async (req, res) => {
 });
 
 // ── POST /api/payments/confirm-delivery/:id ──
+// Réservé au TRANSPORTEUR — marque le colis comme livré
+// Le paiement n'est PAS encore capturé — le client doit confirmer (ou 48h s'écoulent)
 router.post('/confirm-delivery/:id', auth, async (req, res) => {
   try {
     const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Réservation introuvable' });
     const booking = rows[0];
-    if (booking.client_id !== req.user.id && booking.carrier_id !== req.user.id) {
-      return res.status(403).json({ error: 'Non autorisé' });
+
+    if (booking.carrier_id !== req.user.id) {
+      return res.status(403).json({ error: 'Réservé au transporteur' });
     }
+    if (!['paid', 'in_transit'].includes(booking.status)) {
+      return res.status(400).json({ error: 'Statut invalide pour confirmer la livraison' });
+    }
+
     await db.execute(
-      'UPDATE bookings SET status = ?, delivered_at = NOW(), confirmed_by = ? WHERE id = ?',
-      ['delivered', req.user.role, booking.id]
+      'UPDATE bookings SET status = ?, delivered_at = NOW(), delivery_confirmed_at = NOW() WHERE id = ?',
+      ['delivered', booking.id]
     );
-    res.json({ success: true, message: 'Livraison confirmée' });
+    res.json({ success: true, message: 'Livraison marquée — en attente de confirmation client (48h)' });
   } catch (err) {
+    console.error('Erreur confirm-delivery:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
 
+// ── POST /api/payments/confirm-receipt/:id ───
+// Réservé au CLIENT — confirme qu'il a bien reçu le colis
+// Déclenche immédiatement la capture Stripe → transporteur payé
+router.post('/confirm-receipt/:id', auth, async (req, res) => {
+  try {
+    const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Réservation introuvable' });
+    const booking = rows[0];
+
+    if (booking.client_id !== req.user.id) {
+      return res.status(403).json({ error: 'Réservé au client' });
+    }
+    if (booking.status !== 'delivered') {
+      return res.status(400).json({ error: 'Le transporteur n\'a pas encore marqué la livraison' });
+    }
+
+    await stripe.paymentIntents.capture(booking.payment_intent_id);
+    await db.execute(
+      'UPDATE bookings SET status = ?, receipt_confirmed_at = NOW() WHERE id = ?',
+      ['completed', booking.id]
+    );
+    await db.execute(
+      'UPDATE users SET total_trips = total_trips + 1 WHERE id = ?',
+      [booking.carrier_id]
+    );
+    res.json({ success: true, message: 'Réception confirmée — transporteur payé immédiatement' });
+  } catch (err) {
+    console.error('Erreur confirm-receipt:', err.message);
+    res.status(500).json({ error: 'Erreur lors de la confirmation: ' + err.message });
+  }
+});
+
 // ── POST /api/payments/capture/:id ───────────
+// Appelé par le cron job (auto-libération 48h) — plus appelé par le frontend
 router.post('/capture/:id', auth, async (req, res) => {
   try {
     const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Réservation introuvable' });
     const booking = rows[0];
+
     if (booking.status !== 'delivered') {
       return res.status(400).json({ error: 'La livraison doit être confirmée d\'abord' });
     }
+
     await stripe.paymentIntents.capture(booking.payment_intent_id);
     await db.execute('UPDATE bookings SET status = ? WHERE id = ?', ['completed', booking.id]);
     await db.execute(
@@ -151,19 +185,15 @@ router.post('/refund/:id', auth, async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'Réservation introuvable' });
     const booking = rows[0];
 
-    // Vérifier que c'est bien le client qui annule
     if (booking.client_id !== req.user.id) {
       return res.status(403).json({ error: 'Non autorisé' });
     }
 
-    // Récupérer le statut du PaymentIntent Stripe
     const pi = await stripe.paymentIntents.retrieve(booking.payment_intent_id);
 
     if (pi.status === 'requires_capture') {
-      // Paiement autorisé mais non capturé (escrow) → annuler directement
       await stripe.paymentIntents.cancel(booking.payment_intent_id);
     } else if (pi.status === 'succeeded') {
-      // Paiement déjà capturé → rembourser
       const refundParams = { payment_intent: booking.payment_intent_id, reason: reason || 'requested_by_customer' };
       if (amount) refundParams.amount = Math.round(parseFloat(amount) * 100);
       await stripe.refunds.create(refundParams);
@@ -172,7 +202,6 @@ router.post('/refund/:id', auth, async (req, res) => {
     }
 
     await db.execute('UPDATE bookings SET status = ? WHERE id = ?', ['refunded', booking.id]);
-    // Restituer le stock
     await db.execute(
       'UPDATE listings SET available_kg = available_kg + ?, status = ? WHERE id = ?',
       [parseFloat(booking.weight_kg), 'active', booking.listing_id]
@@ -191,6 +220,7 @@ router.post('/dispute/:id', auth, async (req, res) => {
     const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Réservation introuvable' });
     const booking = rows[0];
+
     await db.execute('UPDATE bookings SET status = ? WHERE id = ?', ['disputed', booking.id]);
     const disputeId = require('crypto').randomUUID();
     await db.execute(`
@@ -203,9 +233,7 @@ router.post('/dispute/:id', auth, async (req, res) => {
   }
 });
 
-
-// ── GET /api/bookings/received ───────────────
-// Réservations reçues par le transporteur connecté
+// ── GET /api/payments/bookings/received ─────
 router.get('/bookings/received', auth, async (req, res) => {
   if (req.user.role !== 'carrier') {
     return res.status(403).json({ error: 'Réservé aux transporteurs' });
@@ -232,7 +260,6 @@ router.get('/bookings/received', auth, async (req, res) => {
 router.get('/bookings/me', auth, async (req, res) => {
   try {
     const field = req.user.role === 'carrier' ? 'carrier_id' : 'client_id';
-
     const [rows] = await db.execute(`
       SELECT b.*, l.origin, l.destination, l.departure_date,
         u.first_name, u.last_name
@@ -242,8 +269,6 @@ router.get('/bookings/me', auth, async (req, res) => {
       WHERE b.${field} = ?
       ORDER BY b.created_at DESC
     `, [req.user.id]);
-
-
     res.json({ bookings: rows });
   } catch (err) {
     console.error('Erreur bookings/me:', err.message);
