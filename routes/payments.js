@@ -71,6 +71,17 @@ router.post('/intent', auth, async (req, res) => {
       pi.id,
     ]);
 
+    // Décrémenter le stock disponible
+    await db.execute(
+      'UPDATE listings SET available_kg = available_kg - ? WHERE id = ?',
+      [parseFloat(weightKg), listingId]
+    );
+    // Désactiver l'annonce si stock épuisé
+    await db.execute(
+      "UPDATE listings SET status = 'inactive' WHERE id = ? AND available_kg <= 0",
+      [listingId]
+    );
+
     console.log(`Booking created: ${bookingId} | listing: ${listingId} | client: ${req.user.id} | pi: ${pi.id}`);
 
     res.json({
