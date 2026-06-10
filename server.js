@@ -9,7 +9,8 @@ const cors      = require('cors');
 const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
 const cron      = require('node-cron');
-const autoCaptureDeliveries = require('./cron/autoCaptureDeliveries');
+const autoCaptureDeliveries  = require('./cron/autoCaptureDeliveries');
+const cancelExpiredBookings  = require('./cron/cancelExpiredBookings');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -114,6 +115,12 @@ app.listen(PORT, () => {
     autoCaptureDeliveries();
   });
   console.log('[Cron] AutoCapture livraisons programmé (toutes les heures)');
+
+  // ── Cron : annulation des réservations sans livraison après 6 jours ──
+  cron.schedule('0 3 * * *', () => {
+    cancelExpiredBookings();
+  });
+  console.log('[Cron] CancelExpired réservations programmé (tous les jours à 3h)');
 });
 
 module.exports = app;
