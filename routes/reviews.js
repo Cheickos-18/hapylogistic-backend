@@ -35,13 +35,18 @@ router.post('/', auth, async (req, res) => {
     );
 
     // Mise à jour du niveau automatique
-    const trips  = bookings[0].carrier_id;
-    const [uRows] = await db.execute('SELECT total_trips, average_rating FROM users WHERE id = ?', [booking.carrier_id]);
+    const [uRows] = await db.execute(
+      'SELECT total_trips, average_rating FROM users WHERE id = ?',
+      [booking.carrier_id]
+    );
     const u = uRows[0];
     let newLevel = 'bronze';
     if (u.total_trips >= 20 && parseFloat(u.average_rating) >= 4.6) newLevel = 'or';
-    else if (u.total_trips >= 5  && parseFloat(u.average_rating) >= 4.2) newLevel = 'argent';
-    await db.execute('UPDATE users SET carrier_level = ? WHERE id = ?', [newLevel, booking.carrier_id]);
+    else if (u.total_trips >= 5 && parseFloat(u.average_rating) >= 4.2) newLevel = 'argent';
+    await db.execute(
+      'UPDATE users SET carrier_level = ? WHERE id = ?',
+      [newLevel, booking.carrier_id]
+    );
 
     res.status(201).json({ success: true, reviewId: id, message: 'Avis publié' });
   } catch (err) {
@@ -55,14 +60,21 @@ router.post('/', auth, async (req, res) => {
 router.get('/carrier/:carrierId', async (req, res) => {
   try {
     const [rows] = await db.execute(`
-      SELECT r.*, u.first_name, u.last_name
-      FROM reviews r JOIN users u ON r.client_id = u.id
+      SELECT
+        r.*,
+        u.first_name, u.last_name,
+        l.origin, l.destination
+      FROM reviews r
+      JOIN users u ON r.client_id = u.id
+      JOIN bookings b ON r.booking_id = b.id
+      JOIN listings l ON b.listing_id = l.id
       WHERE r.carrier_id = ?
       ORDER BY r.created_at DESC
       LIMIT 20
     `, [req.params.carrierId]);
     res.json({ reviews: rows });
   } catch (err) {
+    console.error('Erreur reviews/carrier:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
