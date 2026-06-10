@@ -112,8 +112,12 @@ router.get('/bookings/:id/pickup-code', auth, async (req, res) => {
     if (booking.client_id !== req.user.id) {
       return res.status(403).json({ error: 'Non autorisé' });
     }
-    if (!['paid', 'in_transit'].includes(booking.status) && booking.status !== 'awaiting_payment') {
-      return res.status(400).json({ error: 'Code non disponible pour ce statut' });
+
+    // Générer un code si absent (réservations créées avant la feature)
+    if (!booking.pickup_code) {
+      const newCode = generatePickupCode();
+      await db.execute('UPDATE bookings SET pickup_code = ? WHERE id = ?', [newCode, booking.id]);
+      return res.json({ pickupCode: newCode });
     }
 
     res.json({ pickupCode: booking.pickup_code });
