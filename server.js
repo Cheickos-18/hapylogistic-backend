@@ -52,6 +52,7 @@ app.use('/api/auth',     require('./routes/auth'));
 app.use('/api/listings', require('./routes/listings'));
 app.use('/api/payments', require('./routes/payments'));
 app.use('/api/reviews',  require('./routes/reviews'));
+app.use('/api/disputes', require('./routes/disputes'));
 app.use('/api/webhooks', require('./routes/webhooks'));
 
 // ── Health check (pour Hostinger monitoring) ──
@@ -84,6 +85,7 @@ app.get('/', (req, res) => {
       'GET  /api/payments/bookings/me',
       'POST /api/reviews',
       'GET  /api/reviews/carrier/:id',
+      'GET  /api/disputes/me',
     ]
   });
 });
