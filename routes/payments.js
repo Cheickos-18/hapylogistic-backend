@@ -4,6 +4,7 @@ const router  = express.Router();
 const db      = require('../config/database');
 const auth    = require('../middleware/auth');
 const { stripe, calculateFees } = require('../services/stripe');
+const email   = require('../services/emailService');
 
 // ── Générer un code de collecte à 4 chiffres ─────────────────
 function generatePickupCode() {
@@ -47,7 +48,7 @@ router.post('/intent', auth, async (req, res) => {
 
     if (client.stripe_customer_id) piParams.customer = client.stripe_customer_id;
     if (listing.stripe_account_id) {
-      piParams.transfer_data        = { destination: listing.stripe_account_id, amount: amounts.carrierNet };
+      piParams.transfer_data          = { destination: listing.stripe_account_id, amount: amounts.carrierNet };
       piParams.application_fee_amount = amounts.platformFee;
     }
 
@@ -83,6 +84,11 @@ router.post('/intent', auth, async (req, res) => {
       [listingId]
     );
 
+    // ── Emails de confirmation (après paiement confirmé via webhook) ──
+    // Les emails sont envoyés depuis le webhook Stripe (event: payment_intent.succeeded)
+    // car ici le paiement n'est pas encore confirmé (statut: awaiting_payment)
+    // Voir routes/webhooks.js pour l'envoi des emails post-paiement
+
     res.json({
       success: true,
       clientSecret: pi.client_secret,
@@ -102,7 +108,6 @@ router.post('/intent', auth, async (req, res) => {
 });
 
 // ── GET /api/payments/bookings/:id/pickup-code ─────────────
-// Réservé au CLIENT — affiche le code de collecte
 router.get('/bookings/:id/pickup-code', auth, async (req, res) => {
   try {
     const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
@@ -113,7 +118,6 @@ router.get('/bookings/:id/pickup-code', auth, async (req, res) => {
       return res.status(403).json({ error: 'Non autorisé' });
     }
 
-    // Générer un code si absent (réservations créées avant la feature)
     if (!booking.pickup_code) {
       const newCode = generatePickupCode();
       await db.execute('UPDATE bookings SET pickup_code = ? WHERE id = ?', [newCode, booking.id]);
@@ -128,7 +132,6 @@ router.get('/bookings/:id/pickup-code', auth, async (req, res) => {
 
 // ── POST /api/payments/confirm-pickup/:id ────────────────────
 // Réservé au TRANSPORTEUR — soumet le code de collecte
-// Si correct → statut passe à 'in_transit'
 router.post('/confirm-pickup/:id', auth, async (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Code requis' });
@@ -152,6 +155,23 @@ router.post('/confirm-pickup/:id', auth, async (req, res) => {
       'UPDATE bookings SET status = ?, pickup_confirmed_at = NOW() WHERE id = ?',
       ['in_transit', booking.id]
     );
+
+    // ── Email : collecte confirmée → notification client ──
+    try {
+      const [listings] = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
+      const [clientRows] = await db.execute('SELECT * FROM users WHERE id = ?', [booking.client_id]);
+      if (listings.length && clientRows.length) {
+        await email.sendPickupConfirmed({
+          to:        clientRows[0].email,
+          firstName: clientRows[0].first_name,
+          booking,
+          listing:   listings[0],
+        });
+      }
+    } catch (emailErr) {
+      console.error('[EMAIL] sendPickupConfirmed failed:', emailErr.message);
+    }
+
     res.json({ success: true, message: 'Collecte confirmée — colis en transit ✅' });
   } catch (err) {
     console.error('Erreur confirm-pickup:', err.message);
@@ -178,6 +198,23 @@ router.post('/confirm-delivery/:id', auth, async (req, res) => {
       'UPDATE bookings SET status = ?, delivered_at = NOW(), delivery_confirmed_at = NOW() WHERE id = ?',
       ['delivered', booking.id]
     );
+
+    // ── Email : livraison marquée → demande confirmation au client ──
+    try {
+      const [listings] = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
+      const [clientRows] = await db.execute('SELECT * FROM users WHERE id = ?', [booking.client_id]);
+      if (listings.length && clientRows.length) {
+        await email.sendDeliveryRequest({
+          to:        clientRows[0].email,
+          firstName: clientRows[0].first_name,
+          booking,
+          listing:   listings[0],
+        });
+      }
+    } catch (emailErr) {
+      console.error('[EMAIL] sendDeliveryRequest failed:', emailErr.message);
+    }
+
     res.json({ success: true, message: 'Livraison marquée — en attente de confirmation client (48h)' });
   } catch (err) {
     console.error('Erreur confirm-delivery:', err.message);
@@ -209,6 +246,25 @@ router.post('/confirm-receipt/:id', auth, async (req, res) => {
       'UPDATE users SET total_trips = total_trips + 1 WHERE id = ?',
       [booking.carrier_id]
     );
+
+    // ── Email : réception confirmée → paiement viré au transporteur ──
+    try {
+      const [listings]  = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
+      const [carriers]  = await db.execute('SELECT * FROM users WHERE id = ?', [booking.carrier_id]);
+      if (listings.length && carriers.length) {
+        const netAmount = parseFloat(booking.carrier_net);
+        await email.sendReceiptConfirmed({
+          to:               carriers[0].email,
+          carrierFirstName: carriers[0].first_name,
+          booking,
+          listing:          listings[0],
+          netAmount,
+        });
+      }
+    } catch (emailErr) {
+      console.error('[EMAIL] sendReceiptConfirmed failed:', emailErr.message);
+    }
+
     res.json({ success: true, message: 'Réception confirmée — transporteur payé immédiatement' });
   } catch (err) {
     console.error('Erreur confirm-receipt:', err.message);
@@ -217,7 +273,6 @@ router.post('/confirm-receipt/:id', auth, async (req, res) => {
 });
 
 // ── POST /api/payments/capture/:id ───────────────────────────
-// Appelé par le cron job (auto-libération 48h)
 router.post('/capture/:id', auth, async (req, res) => {
   try {
     const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
@@ -270,6 +325,25 @@ router.post('/refund/:id', auth, async (req, res) => {
       'UPDATE listings SET available_kg = available_kg + ?, status = ? WHERE id = ?',
       [parseFloat(booking.weight_kg), 'active', booking.listing_id]
     );
+
+    // ── Email : remboursement au client ──
+    try {
+      const [listings]   = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
+      const [clientRows] = await db.execute('SELECT * FROM users WHERE id = ?', [booking.client_id]);
+      if (listings.length && clientRows.length) {
+        await email.sendRefundNotification({
+          to:           clientRows[0].email,
+          firstName:    clientRows[0].first_name,
+          booking,
+          listing:      listings[0],
+          refundAmount: parseFloat(booking.client_total),
+          reason:       reason || 'Annulation de la réservation',
+        });
+      }
+    } catch (emailErr) {
+      console.error('[EMAIL] sendRefundNotification failed:', emailErr.message);
+    }
+
     res.json({ success: true, message: 'Réservation annulée — remboursement en cours' });
   } catch (err) {
     console.error('Erreur refund:', err.message);
@@ -291,6 +365,27 @@ router.post('/dispute/:id', auth, async (req, res) => {
       INSERT INTO disputes (id, booking_id, client_id, carrier_id, reason, description, payment_intent_id)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `, [disputeId, booking.id, booking.client_id, booking.carrier_id, reason || null, description || null, booking.payment_intent_id]);
+
+    // ── Emails : litige ouvert → client + transporteur + support ──
+    try {
+      const [listings]   = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
+      const [clientRows] = await db.execute('SELECT * FROM users WHERE id = ?', [booking.client_id]);
+      const [carrierRows]= await db.execute('SELECT * FROM users WHERE id = ?', [booking.carrier_id]);
+      if (listings.length && clientRows.length && carrierRows.length) {
+        await email.sendDisputeOpened({
+          clientEmail:  clientRows[0].email,
+          carrierEmail: carrierRows[0].email,
+          client:  { firstName: clientRows[0].first_name,  lastName: clientRows[0].last_name },
+          carrier: { firstName: carrierRows[0].first_name, lastName: carrierRows[0].last_name },
+          booking,
+          listing: listings[0],
+          reason:  reason || 'Non précisé',
+        });
+      }
+    } catch (emailErr) {
+      console.error('[EMAIL] sendDisputeOpened failed:', emailErr.message);
+    }
+
     res.status(201).json({ success: true, disputeId, message: 'Litige ouvert. Notre équipe vous contactera sous 48h.' });
   } catch (err) {
     res.status(500).json({ error: 'Erreur serveur' });
