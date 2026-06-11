@@ -49,15 +49,16 @@ app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // ── Routes ────────────────────────────────────
-app.use('/api',          require('./routes/config'));   // ← config publique (clé Stripe, etc.)
+app.use('/api',          require('./routes/config'));
 app.use('/api/auth',     require('./routes/auth'));
 app.use('/api/listings', require('./routes/listings'));
 app.use('/api/payments', require('./routes/payments'));
 app.use('/api/reviews',  require('./routes/reviews'));
 app.use('/api/disputes', require('./routes/disputes'));
+app.use('/api/messages', require('./routes/messages'));
 app.use('/api/webhooks', require('./routes/webhooks'));
 
-// ── Health check (pour Hostinger monitoring) ──
+// ── Health check ──────────────────────────────
 app.get('/health', (req, res) => {
   res.json({
     status:  'ok',
@@ -88,6 +89,9 @@ app.get('/', (req, res) => {
       'POST /api/reviews',
       'GET  /api/reviews/carrier/:id',
       'GET  /api/disputes/me',
+      'GET  /api/disputes/carrier',
+      'GET  /api/messages/:bookingId',
+      'POST /api/messages/:bookingId',
       'GET  /api/config',
     ]
   });
@@ -115,22 +119,13 @@ app.listen(PORT, () => {
   ╚══════════════════════════════════════╝
   `);
 
-  // ── Cron : auto-capture des livraisons après 48h sans confirmation client ──
-  cron.schedule('0 * * * *', () => {
-    autoCaptureDeliveries();
-  });
+  cron.schedule('0 * * * *', () => { autoCaptureDeliveries(); });
   console.log('[Cron] AutoCapture livraisons programmé (toutes les heures)');
 
-  // ── Cron : annulation des réservations sans livraison après 6 jours ──
-  cron.schedule('0 3 * * *', () => {
-    cancelExpiredBookings();
-  });
+  cron.schedule('0 3 * * *', () => { cancelExpiredBookings(); });
   console.log('[Cron] CancelExpired réservations programmé (tous les jours à 3h)');
 
-  // ── Cron : nettoyage des réservations terminées/annulées/remboursées après 48h ──
-  cron.schedule('0 4 * * *', () => {
-    cleanOldBookings();
-  });
+  cron.schedule('0 4 * * *', () => { cleanOldBookings(); });
   console.log('[Cron] CleanOldBookings programmé (tous les jours à 4h)');
 });
 
