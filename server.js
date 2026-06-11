@@ -49,6 +49,7 @@ app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // ── Routes ────────────────────────────────────
+app.use('/api',          require('./routes/config'));   // ← config publique (clé Stripe, etc.)
 app.use('/api/auth',     require('./routes/auth'));
 app.use('/api/listings', require('./routes/listings'));
 app.use('/api/payments', require('./routes/payments'));
@@ -87,6 +88,7 @@ app.get('/', (req, res) => {
       'POST /api/reviews',
       'GET  /api/reviews/carrier/:id',
       'GET  /api/disputes/me',
+      'GET  /api/config',
     ]
   });
 });
