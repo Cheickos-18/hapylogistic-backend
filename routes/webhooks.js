@@ -3,6 +3,7 @@ const express = require('express');
 const router  = express.Router();
 const { stripe } = require('../services/stripe');
 const db = require('../config/database');
+const email = require('../services/emailService');
 
 router.post('/stripe', async (req, res) => {
   const sig    = req.headers['stripe-signature'];
@@ -25,24 +26,65 @@ router.post('/stripe', async (req, res) => {
       // C'est le signal fiable que le paiement est bien passé
       case 'payment_intent.amount_capturable_updated': {
         const pi = event.data.object;
-        // Ne mettre à jour que si le statut est encore awaiting_payment
-        // pour ne pas écraser un statut plus avancé (paid, in_transit, etc.)
         await db.execute(
           "UPDATE bookings SET status = 'paid' WHERE payment_intent_id = ? AND status = 'awaiting_payment'",
           [pi.id]
         );
         console.log(`✅ Booking passé à 'paid' via webhook: ${pi.id}`);
+
+        // ── Emails de confirmation réservation ──
+        // Envoyés ici car c'est le seul moment où le paiement est GARANTI
+        try {
+          const [bookings] = await db.execute(
+            'SELECT * FROM bookings WHERE payment_intent_id = ?',
+            [pi.id]
+          );
+          if (bookings.length) {
+            const booking = bookings[0];
+            const [listings]    = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
+            const [clientRows]  = await db.execute('SELECT * FROM users WHERE id = ?', [booking.client_id]);
+            const [carrierRows] = await db.execute('SELECT * FROM users WHERE id = ?', [booking.carrier_id]);
+
+            if (listings.length && clientRows.length && carrierRows.length) {
+              const listing = listings[0];
+              const client  = clientRows[0];
+              const carrier = carrierRows[0];
+
+              // Email 1 — Confirmation au client avec code de collecte
+              await email.sendBookingConfirmation({
+                to:         client.email,
+                firstName:  client.first_name,
+                booking,
+                listing,
+                pickupCode: booking.pickup_code,
+              });
+
+              // Email 2 — Nouvelle réservation au transporteur
+              await email.sendNewBookingToCarrier({
+                to:               carrier.email,
+                carrierFirstName: carrier.first_name,
+                booking,
+                listing,
+                client: {
+                  firstName: client.first_name,
+                  lastName:  client.last_name,
+                  email:     client.email,
+                },
+              });
+
+              console.log(`📧 Emails de confirmation envoyés pour booking ${booking.id}`);
+            }
+          }
+        } catch (emailErr) {
+          console.error('[EMAIL] sendBookingConfirmation failed:', emailErr.message);
+        }
+
         break;
       }
 
       // ── Paiement capturé (transporteur payé) ──
-      // Se déclenche après confirm-receipt ou auto-capture 48h
-      // Ne pas écraser 'delivered' → 'completed' si le flux normal est déjà passé par là
       case 'payment_intent.succeeded': {
         const pi = event.data.object;
-        // Mettre à jour uniquement si le statut est 'delivered'
-        // (la capture vient juste d'avoir lieu)
-        // Si c'est déjà 'completed', ne rien faire
         await db.execute(
           "UPDATE bookings SET status = 'completed' WHERE payment_intent_id = ? AND status = 'delivered'",
           [pi.id]
@@ -65,7 +107,6 @@ router.post('/stripe', async (req, res) => {
       // ── PaymentIntent annulé (expiration 7 jours ou annulation manuelle) ──
       case 'payment_intent.canceled': {
         const pi = event.data.object;
-        // Restituer le stock si annulation Stripe automatique
         const [rows] = await db.execute(
           'SELECT * FROM bookings WHERE payment_intent_id = ?',
           [pi.id]
@@ -75,7 +116,6 @@ router.post('/stripe', async (req, res) => {
             "UPDATE bookings SET status = 'cancelled' WHERE payment_intent_id = ?",
             [pi.id]
           );
-          // Restituer le stock
           await db.execute(
             'UPDATE listings SET available_kg = available_kg + ?, status = ? WHERE id = ?',
             [parseFloat(rows[0].weight_kg), 'active', rows[0].listing_id]
@@ -102,7 +142,6 @@ router.post('/stripe', async (req, res) => {
       case 'charge.dispute.created': {
         const dispute = event.data.object;
         console.log(`⚠️ Chargeback détecté: ${dispute.id} — montant: ${dispute.amount / 100} €`);
-        // Marquer la réservation comme disputée pour investigation manuelle
         await db.execute(
           "UPDATE bookings SET status = 'disputed' WHERE payment_intent_id = ?",
           [dispute.payment_intent]
@@ -114,8 +153,6 @@ router.post('/stripe', async (req, res) => {
         break;
     }
   } catch (err) {
-    // Ne pas retourner d'erreur à Stripe (sinon il re-tentera)
-    // Logger seulement pour investigation
     console.error(`Erreur traitement webhook ${event.type}:`, err.message);
   }
 
