@@ -86,6 +86,21 @@ router.get('/', async (req, res) => {
   }
 });
 
+// ── GET /api/listings/carrier/me ─────────────
+// IMPORTANT : cette route doit être AVANT /:id sinon Express l'interprète comme un id
+router.get('/carrier/me', auth, async (req, res) => {
+  if (req.user.role !== 'carrier') return res.status(403).json({ error: 'Non autorisé' });
+  try {
+    const [rows] = await db.execute(
+      'SELECT * FROM listings WHERE carrier_id = ? ORDER BY created_at DESC',
+      [req.user.id]
+    );
+    res.json({ listings: rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
 // ── GET /api/listings/:id ────────────────────
 router.get('/:id', async (req, res) => {
   try {
@@ -138,35 +153,43 @@ router.post('/', auth, async (req, res) => {
 
 // ── PATCH /api/listings/:id ──────────────────
 router.patch('/:id', auth, async (req, res) => {
-  const { availableKg, status, pricePerKg, description } = req.body;
+  const { origin, destination, departureDate, type, availableKg, pricePerKg, description, status } = req.body;
   try {
-    const [rows] = await db.execute('SELECT * FROM listings WHERE id = ? AND carrier_id = ?', [req.params.id, req.user.id]);
+    const [rows] = await db.execute(
+      'SELECT * FROM listings WHERE id = ? AND carrier_id = ?',
+      [req.params.id, req.user.id]
+    );
     if (!rows.length) return res.status(404).json({ error: 'Annonce introuvable ou non autorisé' });
     const listing = rows[0];
 
-    // Si le transporteur met en pause → rembourser les réservations paid
-    let refundedBookings = 0;
+    // Si mise en pause → rembourser les réservations paid
     if (status && status === 'inactive' && listing.status === 'active') {
-      refundedBookings = await refundListingBookings(req.params.id, 'listing_paused');
+      await refundListingBookings(req.params.id, 'listing_paused');
     }
 
     // Si le prix augmente de plus de 20% → rembourser les réservations paid
     if (pricePerKg && parseFloat(pricePerKg) > parseFloat(listing.price_per_kg) * 1.2) {
-      refundedBookings = await refundListingBookings(req.params.id, 'price_increase');
+      await refundListingBookings(req.params.id, 'price_increase');
     }
 
     const updates = [];
     const params  = [];
-    if (availableKg !== undefined) { updates.push('available_kg = ?');  params.push(parseFloat(availableKg)); }
-    if (status)                    { updates.push('status = ?');        params.push(status); }
-    if (pricePerKg)                { updates.push('price_per_kg = ?');  params.push(parseFloat(pricePerKg)); }
-    if (description !== undefined) { updates.push('description = ?');   params.push(description); }
+
+    if (origin        !== undefined) { updates.push('origin = ?');        params.push(origin); }
+    if (destination   !== undefined) { updates.push('destination = ?');   params.push(destination); }
+    if (departureDate !== undefined) { updates.push('departure_date = ?');params.push(departureDate); }
+    if (type          !== undefined) { updates.push('type = ?');          params.push(type); }
+    if (availableKg   !== undefined) { updates.push('available_kg = ?');  params.push(parseFloat(availableKg)); }
+    if (pricePerKg    !== undefined) { updates.push('price_per_kg = ?');  params.push(parseFloat(pricePerKg)); }
+    if (description   !== undefined) { updates.push('description = ?');   params.push(description); }
+    if (status        !== undefined) { updates.push('status = ?');        params.push(status); }
+
     if (!updates.length) return res.status(400).json({ error: 'Aucune donnée à mettre à jour' });
 
     params.push(req.params.id);
     await db.execute(`UPDATE listings SET ${updates.join(', ')} WHERE id = ?`, params);
     const [updated] = await db.execute('SELECT * FROM listings WHERE id = ?', [req.params.id]);
-    res.json({ success: true, listing: updated[0], refundedBookings });
+    res.json({ success: true, listing: updated[0] });
   } catch (err) {
     console.error('Erreur patch listing:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });
@@ -176,30 +199,17 @@ router.patch('/:id', auth, async (req, res) => {
 // ── DELETE /api/listings/:id ─────────────────
 router.delete('/:id', auth, async (req, res) => {
   try {
-    const [rows] = await db.execute('SELECT * FROM listings WHERE id = ? AND carrier_id = ?', [req.params.id, req.user.id]);
+    const [rows] = await db.execute(
+      'SELECT * FROM listings WHERE id = ? AND carrier_id = ?',
+      [req.params.id, req.user.id]
+    );
     if (!rows.length) return res.status(404).json({ error: 'Non autorisé' });
 
-    // Rembourser automatiquement toutes les réservations paid
     const refundCount = await refundListingBookings(req.params.id, 'listing_deleted');
-
-    await db.execute('UPDATE listings SET status = ? WHERE id = ?', ['cancelled', req.params.id]);
+    await db.execute("UPDATE listings SET status = 'cancelled' WHERE id = ?", [req.params.id]);
     res.json({ success: true, refundedBookings: refundCount });
   } catch (err) {
     console.error('Erreur delete listing:', err.message);
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
-});
-
-// ── GET /api/listings/carrier/me ─────────────
-router.get('/carrier/me', auth, async (req, res) => {
-  if (req.user.role !== 'carrier') return res.status(403).json({ error: 'Non autorisé' });
-  try {
-    const [rows] = await db.execute(
-      'SELECT * FROM listings WHERE carrier_id = ? ORDER BY created_at DESC',
-      [req.user.id]
-    );
-    res.json({ listings: rows });
-  } catch (err) {
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
