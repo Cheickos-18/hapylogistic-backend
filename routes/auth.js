@@ -5,6 +5,197 @@ const bcrypt   = require('bcryptjs');
 const jwt      = require('jsonwebtoken');
 const db       = require('../config/database');
 const { stripe } = require('../services/stripe');
+const { Resend } = require('resend');
+
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+// ── Templates email ──────────────────────────────────────────
+function emailWelcomeClient(firstName) {
+  return {
+    subject: '🎉 Bienvenue sur HapyLogistic !',
+    html: `<!DOCTYPE html>
+<html lang="fr">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f4f6f9;font-family:'Segoe UI',Arial,sans-serif">
+  <div style="max-width:600px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.08)">
+    <!-- Header -->
+    <div style="background:linear-gradient(135deg,#1a1aff,#4f46e5);padding:40px 32px;text-align:center">
+      <div style="font-size:32px;font-weight:900;color:#fff;letter-spacing:-1px">Hapy<span style="color:#ffd700">Logistic</span></div>
+      <div style="color:rgba(255,255,255,.8);margin-top:8px;font-size:14px">Envoyez partout. Livrez le monde.</div>
+    </div>
+    <!-- Body -->
+    <div style="padding:40px 32px">
+      <h1 style="margin:0 0 12px;font-size:24px;color:#1a1a2e">Bonjour ${firstName} 👋</h1>
+      <p style="color:#555;line-height:1.7;margin:0 0 24px">Bienvenue sur HapyLogistic ! Votre compte client est maintenant actif. Vous pouvez dès maintenant envoyer vos colis partout dans le monde via nos transporteurs communautaires vérifiés.</p>
+
+      <!-- Comment ça marche -->
+      <div style="background:#f8f9ff;border-radius:12px;padding:24px;margin-bottom:24px">
+        <div style="font-weight:700;color:#1a1a2e;margin-bottom:16px;font-size:16px">📦 Comment envoyer un colis ?</div>
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <div style="display:flex;gap:12px;align-items:flex-start">
+            <div style="background:#4f46e5;color:#fff;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0">1</div>
+            <div><strong style="color:#1a1a2e">Trouvez un transporteur</strong><br><span style="color:#666;font-size:14px">Parcourez les transporteurs qui se rendent à votre destination et choisissez celui qui correspond à vos besoins.</span></div>
+          </div>
+          <div style="display:flex;gap:12px;align-items:flex-start">
+            <div style="background:#4f46e5;color:#fff;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0">2</div>
+            <div><strong style="color:#1a1a2e">Payez en toute sécurité</strong><br><span style="color:#666;font-size:14px">Votre paiement est sécurisé par <strong>Stripe Escrow</strong> — l'argent est bloqué et ne sera versé au transporteur qu'après confirmation de livraison.</span></div>
+          </div>
+          <div style="display:flex;gap:12px;align-items:flex-start">
+            <div style="background:#4f46e5;color:#fff;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0">3</div>
+            <div><strong style="color:#1a1a2e">Confirmez la livraison</strong><br><span style="color:#666;font-size:14px">Quand vous recevez votre colis, confirmez la livraison dans l'application. Le transporteur reçoit son paiement.</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Paiements & Remboursements -->
+      <div style="border:2px solid #e8f4fd;border-radius:12px;padding:24px;margin-bottom:24px">
+        <div style="font-weight:700;color:#1a1a2e;margin-bottom:16px;font-size:16px">💳 Paiements & Remboursements</div>
+        <table style="width:100%;border-collapse:collapse">
+          <tr>
+            <td style="padding:8px 0;border-bottom:1px solid #f0f0f0;width:50%">
+              <span style="color:#4f46e5;font-weight:600">✅ Livraison confirmée</span><br>
+              <span style="color:#666;font-size:13px">Le transporteur reçoit son paiement sous 24-48h.</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;border-bottom:1px solid #f0f0f0">
+              <span style="color:#e53e3e;font-weight:600">❌ Colis non reçu</span><br>
+              <span style="color:#666;font-size:13px">Ouvrez un litige — remboursement intégral garanti après vérification.</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;border-bottom:1px solid #f0f0f0">
+              <span style="color:#d97706;font-weight:600">⚠️ Colis endommagé</span><br>
+              <span style="color:#666;font-size:13px">Litige avec photos à l'appui — remboursement partiel ou total selon le cas.</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0">
+              <span style="color:#7c3aed;font-weight:600">🚫 Annulation avant collecte</span><br>
+              <span style="color:#666;font-size:13px">Remboursement intégral dans les 24h.</span>
+            </td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- CTA -->
+      <div style="text-align:center;margin-top:32px">
+        <a href="${process.env.FRONTEND_URL}/pages/listings.html" style="display:inline-block;background:linear-gradient(135deg,#1a1aff,#4f46e5);color:#fff;text-decoration:none;padding:14px 36px;border-radius:50px;font-weight:700;font-size:16px">
+          Trouver un transporteur →
+        </a>
+      </div>
+    </div>
+    <!-- Footer -->
+    <div style="background:#f8f9ff;padding:24px 32px;text-align:center;border-top:1px solid #e8e8f0">
+      <p style="margin:0;color:#888;font-size:13px">Une question ? Répondez à cet email ou contactez <a href="mailto:contact@hapylogistic.com" style="color:#4f46e5">contact@hapylogistic.com</a></p>
+      <p style="margin:8px 0 0;color:#aaa;font-size:12px">© 2026 HapyLogistic — Envoyez partout, livrez le monde</p>
+    </div>
+  </div>
+</body>
+</html>`
+  };
+}
+
+function emailWelcomeCarrier(firstName) {
+  return {
+    subject: '✈️ Bienvenue transporteur HapyLogistic !',
+    html: `<!DOCTYPE html>
+<html lang="fr">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f4f6f9;font-family:'Segoe UI',Arial,sans-serif">
+  <div style="max-width:600px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.08)">
+    <!-- Header -->
+    <div style="background:linear-gradient(135deg,#1a1aff,#4f46e5);padding:40px 32px;text-align:center">
+      <div style="font-size:32px;font-weight:900;color:#fff;letter-spacing:-1px">Hapy<span style="color:#ffd700">Logistic</span></div>
+      <div style="color:rgba(255,255,255,.8);margin-top:8px;font-size:14px">Gagnez de l'argent à chaque trajet</div>
+    </div>
+    <!-- Body -->
+    <div style="padding:40px 32px">
+      <h1 style="margin:0 0 12px;font-size:24px;color:#1a1a2e">Bienvenue ${firstName} ✈️</h1>
+      <p style="color:#555;line-height:1.7;margin:0 0 24px">Félicitations, votre compte transporteur est créé ! Vous pouvez maintenant rentabiliser vos voyages en transportant des colis pour d'autres membres de la communauté.</p>
+
+      <!-- Étapes pour commencer -->
+      <div style="background:#f8f9ff;border-radius:12px;padding:24px;margin-bottom:24px">
+        <div style="font-weight:700;color:#1a1a2e;margin-bottom:16px;font-size:16px">🚀 Pour commencer à gagner</div>
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <div style="display:flex;gap:12px;align-items:flex-start">
+            <div style="background:#059669;color:#fff;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0">1</div>
+            <div><strong style="color:#1a1a2e">Complétez votre KYC</strong><br><span style="color:#666;font-size:14px">Vérifiez votre identité via Stripe Identity (pièce d'identité + selfie). Obligatoire pour publier des annonces.</span></div>
+          </div>
+          <div style="display:flex;gap:12px;align-items:flex-start">
+            <div style="background:#059669;color:#fff;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0">2</div>
+            <div><strong style="color:#1a1a2e">Publiez une annonce</strong><br><span style="color:#666;font-size:14px">Indiquez votre trajet, les dates, la capacité disponible (kg) et votre prix au kilo.</span></div>
+          </div>
+          <div style="display:flex;gap:12px;align-items:flex-start">
+            <div style="background:#059669;color:#fff;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0">3</div>
+            <div><strong style="color:#1a1a2e">Recevez des réservations</strong><br><span style="color:#666;font-size:14px">Les clients réservent et paient à l'avance. Vous êtes notifié immédiatement.</span></div>
+          </div>
+          <div style="display:flex;gap:12px;align-items:flex-start">
+            <div style="background:#059669;color:#fff;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0">4</div>
+            <div><strong style="color:#1a1a2e">Livrez & soyez payé</strong><br><span style="color:#666;font-size:14px">Après confirmation de livraison, votre paiement est versé automatiquement sous 24-48h.</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Commission & Paiements -->
+      <div style="border:2px solid #d1fae5;border-radius:12px;padding:24px;margin-bottom:24px">
+        <div style="font-weight:700;color:#1a1a2e;margin-bottom:16px;font-size:16px">💰 Commission & Paiements</div>
+        <table style="width:100%;border-collapse:collapse">
+          <tr>
+            <td style="padding:8px 0;border-bottom:1px solid #f0f0f0">
+              <span style="color:#059669;font-weight:600">✅ Commission fixe : 7%</span><br>
+              <span style="color:#666;font-size:13px">Prélevée automatiquement sur chaque transaction. Pas d'abonnement, pas de frais cachés.</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;border-bottom:1px solid #f0f0f0">
+              <span style="color:#4f46e5;font-weight:600">⏱️ Délai de paiement</span><br>
+              <span style="color:#666;font-size:13px">Votre argent est versé 24-48h après confirmation de livraison par le client.</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;border-bottom:1px solid #f0f0f0">
+              <span style="color:#d97706;font-weight:600">❌ Annulation avant collecte</span><br>
+              <span style="color:#666;font-size:13px">Le client est remboursé intégralement. Pas de pénalité pour vous si annulation dans les délais.</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0">
+              <span style="color:#e53e3e;font-weight:600">⚖️ En cas de litige</span><br>
+              <span style="color:#666;font-size:13px">L'équipe HapyLogistic examine chaque litige. Répondez rapidement dans l'application pour accélérer la résolution.</span>
+            </td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- Niveaux -->
+      <div style="background:#fffbeb;border:2px solid #fcd34d;border-radius:12px;padding:20px;margin-bottom:24px">
+        <div style="font-weight:700;color:#1a1a2e;margin-bottom:12px">🏆 Système de niveaux</div>
+        <div style="font-size:13px;color:#666;line-height:1.8">
+          🥉 <strong>Bronze</strong> — Débutant (0-4 trajets)<br>
+          🥈 <strong>Argent</strong> — Confirmé (5-19 trajets, note ≥ 4.0)<br>
+          🥇 <strong>Or</strong> — Expert (20+ trajets, note ≥ 4.5)<br>
+          <span style="color:#888;font-size:12px;margin-top:4px;display:block">Les niveaux supérieurs augmentent votre visibilité dans les recherches.</span>
+        </div>
+      </div>
+
+      <!-- CTA -->
+      <div style="text-align:center;margin-top:32px">
+        <a href="${process.env.FRONTEND_URL}/pages/dashboard-carrier.html" style="display:inline-block;background:linear-gradient(135deg,#059669,#10b981);color:#fff;text-decoration:none;padding:14px 36px;border-radius:50px;font-weight:700;font-size:16px">
+          Accéder à mon tableau de bord →
+        </a>
+      </div>
+    </div>
+    <!-- Footer -->
+    <div style="background:#f8f9ff;padding:24px 32px;text-align:center;border-top:1px solid #e8e8f0">
+      <p style="margin:0;color:#888;font-size:13px">Une question ? Répondez à cet email ou contactez <a href="mailto:contact@hapylogistic.com" style="color:#4f46e5">contact@hapylogistic.com</a></p>
+      <p style="margin:8px 0 0;color:#aaa;font-size:12px">© 2026 HapyLogistic — Gagnez de l'argent à chaque trajet</p>
+    </div>
+  </div>
+</body>
+</html>`
+  };
+}
 
 function generateToken(user) {
   return jwt.sign(
@@ -86,6 +277,23 @@ router.post('/register', async (req, res) => {
     const [rows] = await db.execute('SELECT * FROM users WHERE id = ?', [userId]);
     const user = rows[0];
     const token = generateToken(user);
+
+    // ── Envoi email de bienvenue ──────────────
+    try {
+      const template = role === 'client'
+        ? emailWelcomeClient(firstName)
+        : emailWelcomeCarrier(firstName);
+
+      await resend.emails.send({
+        from: 'HapyLogistic <contact@hapylogistic.com>',
+        to:   email,
+        subject: template.subject,
+        html: template.html,
+      });
+    } catch (emailErr) {
+      // Ne pas bloquer l'inscription si l'email échoue
+      console.warn('Email bienvenue non envoyé:', emailErr.message);
+    }
 
     res.status(201).json({
       success: true,
