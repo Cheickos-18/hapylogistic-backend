@@ -80,9 +80,9 @@ router.get('/:id', auth, async (req, res) => {
 });
 
 // ── POST /api/disputes/:id/respond ───────────────────────────
-// Transporteur ou client : répondre à un litige
+// Transporteur ou client : ajouter un message au fil du litige
 router.post('/:id/respond', auth, async (req, res) => {
-  const { message } = req.body;
+  const { message, role } = req.body;
   if (!message || !message.trim()) {
     return res.status(400).json({ error: 'Message requis' });
   }
@@ -97,13 +97,50 @@ router.post('/:id/respond', auth, async (req, res) => {
       return res.status(403).json({ error: 'Non autorisé' });
     }
 
-    const prefix = dispute.carrier_id === req.user.id ? '[Transporteur]' : '[Client]';
+    // Déterminer le rôle de l'expéditeur
+    const senderRole = role ||
+      (dispute.carrier_id === req.user.id ? 'carrier' : 'client');
+
+    // Parser l'historique existant (rétrocompatible avec l'ancien format texte)
+    let history = [];
+    if (dispute.resolution) {
+      try {
+        const parsed = JSON.parse(dispute.resolution);
+        if (Array.isArray(parsed)) {
+          history = parsed;
+        } else {
+          // Ancien format JSON non-array : on l'ignore et repart de zéro
+          history = [];
+        }
+      } catch (e) {
+        // Ancien format texte brut "[Transporteur] message" → convertir en JSON
+        const clean = dispute.resolution
+          .replace(/^\[Transporteur\]\s*|\[Carrier\]\s*/i, '').trim();
+        if (clean) {
+          history = [{
+            role: 'carrier',
+            text: clean,
+            ts: dispute.updated_at
+              ? new Date(dispute.updated_at).toISOString()
+              : new Date().toISOString()
+          }];
+        }
+      }
+    }
+
+    // Ajouter le nouveau message
+    history.push({
+      role: senderRole,
+      text: message.trim(),
+      ts: new Date().toISOString()
+    });
+
     await db.execute(
       'UPDATE disputes SET resolution = ?, updated_at = NOW() WHERE id = ?',
-      [`${prefix} ${message.trim()}`, dispute.id]
+      [JSON.stringify(history), dispute.id]
     );
 
-    res.json({ success: true, message: 'Réponse enregistrée' });
+    res.json({ success: true, message: 'Réponse enregistrée', history });
   } catch (err) {
     console.error('Erreur POST /disputes/:id/respond:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });
