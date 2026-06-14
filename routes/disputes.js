@@ -3,6 +3,33 @@ const express = require('express');
 const router  = express.Router();
 const db      = require('../config/database');
 const auth    = require('../middleware/auth');
+const { stripe } = require('../services/stripe');
+
+// ── Helper : appliquer l'issue convenue d'un litige à la réservation ──
+async function applyDisputeOutcome(booking, outcome) {
+  const pi = await stripe.paymentIntents.retrieve(booking.payment_intent_id);
+  if (outcome === 'refunded') {
+    if (pi.status === 'requires_capture') {
+      await stripe.paymentIntents.cancel(booking.payment_intent_id);
+    } else if (pi.status === 'succeeded') {
+      await stripe.refunds.create({ payment_intent: booking.payment_intent_id, reason: 'requested_by_customer' });
+    }
+    await db.execute('UPDATE bookings SET status = ? WHERE id = ?', ['refunded', booking.id]);
+    await db.execute(
+      "UPDATE listings SET available_kg = available_kg + ?, status = IF(status = 'inactive', 'active', status) WHERE id = ?",
+      [parseFloat(booking.weight_kg), booking.listing_id]
+    );
+  } else {
+    // 'completed' — livraison confirmée, le transporteur est payé
+    if (pi.status === 'requires_capture') {
+      await stripe.paymentIntents.capture(booking.payment_intent_id);
+    }
+    await db.execute(
+      'UPDATE bookings SET status = ?, receipt_confirmed_at = NOW() WHERE id = ?',
+      ['completed', booking.id]
+    );
+  }
+}
 
 // ── GET /api/disputes/me ─────────────────────────────────────
 // Client : ses propres litiges
@@ -13,6 +40,7 @@ router.get('/me', auth, async (req, res) => {
         d.id, d.booking_id, d.reason, d.description,
         d.status, d.resolution, d.created_at, d.updated_at,
         d.resolved_by_client, d.resolved_by_carrier,
+        d.resolution_outcome_client, d.resolution_outcome_carrier,
         b.client_total AS amount,
         l.origin, l.destination, l.departure_date,
         u.first_name AS carrier_first_name,
@@ -40,6 +68,7 @@ router.get('/carrier', auth, async (req, res) => {
         d.id, d.booking_id, d.reason, d.description,
         d.status, d.resolution, d.created_at, d.updated_at,
         d.resolved_by_client, d.resolved_by_carrier,
+        d.resolution_outcome_client, d.resolution_outcome_carrier,
         b.client_total AS amount,
         l.origin, l.destination, l.departure_date,
         u.first_name AS client_first_name,
@@ -152,7 +181,19 @@ router.post('/:id/respond', auth, async (req, res) => {
 // ── POST /api/disputes/:id/resolve ───────────────────────────
 // Le client OU le transporteur marque le litige comme résolu de son côté.
 // Quand les DEUX parties ont marqué, le litige passe en status='resolved'.
+// ── POST /api/disputes/:id/resolve ───────────────────────────
+// Le client OU le transporteur propose une issue ('completed' = sans
+// remboursement / livraison confirmée, 'refunded' = avec remboursement).
+// Quand les DEUX parties proposent la MÊME issue, le litige passe en
+// status='resolved' et la réservation est mise à jour en conséquence
+// (capture du paiement ou remboursement Stripe).
+// Si les deux issues diffèrent, les propositions sont réinitialisées
+// pour permettre une nouvelle tentative après discussion.
 router.post('/:id/resolve', auth, async (req, res) => {
+  const { outcome } = req.body;
+  if (!['completed', 'refunded'].includes(outcome)) {
+    return res.status(400).json({ error: "Issue invalide (attendu : 'completed' ou 'refunded')" });
+  }
   try {
     const [rows] = await db.execute(
       'SELECT * FROM disputes WHERE id = ?', [req.params.id]
@@ -168,20 +209,25 @@ router.post('/:id/resolve', auth, async (req, res) => {
     }
 
     const isClient = dispute.client_id === req.user.id;
-    const role     = isClient ? 'client' : 'carrier';
 
-    if (isClient && dispute.resolved_by_client) {
-      return res.status(400).json({ error: 'Vous avez déjà marqué ce litige comme résolu' });
+    if (isClient && dispute.resolution_outcome_client) {
+      return res.status(400).json({ error: 'Vous avez déjà proposé une issue pour ce litige' });
     }
-    if (!isClient && dispute.resolved_by_carrier) {
-      return res.status(400).json({ error: 'Vous avez déjà marqué ce litige comme résolu' });
+    if (!isClient && dispute.resolution_outcome_carrier) {
+      return res.status(400).json({ error: 'Vous avez déjà proposé une issue pour ce litige' });
     }
 
-    const resolvedByClient  = isClient ? 1 : dispute.resolved_by_client;
-    const resolvedByCarrier = !isClient ? 1 : dispute.resolved_by_carrier;
-    const bothAgreed = !!(resolvedByClient && resolvedByCarrier);
+    let outcomeClient  = isClient ? outcome : dispute.resolution_outcome_client;
+    let outcomeCarrier = !isClient ? outcome : dispute.resolution_outcome_carrier;
+    let resolvedByClient  = isClient ? 1 : dispute.resolved_by_client;
+    let resolvedByCarrier = !isClient ? 1 : dispute.resolved_by_carrier;
+    const bothProposed = !!(outcomeClient && outcomeCarrier);
 
-    // Ajouter un message système au fil de discussion
+    const outcomeLabel = o => o === 'refunded'
+      ? 'avec remboursement du client'
+      : 'sans remboursement (livraison confirmée)';
+
+    // Fil de discussion
     let history = [];
     if (dispute.resolution) {
       try {
@@ -191,34 +237,65 @@ router.post('/:id/resolve', auth, async (req, res) => {
     }
     history.push({
       role: 'system',
-      text: isClient
-        ? '🤝 Le client a marqué ce litige comme résolu.'
-        : '🤝 Le transporteur a marqué ce litige comme résolu.',
+      text: (isClient ? 'Le client' : 'Le transporteur') + ' propose une résolution ' + outcomeLabel(outcome) + '.',
       ts: new Date().toISOString(),
     });
-    if (bothAgreed) {
-      history.push({
-        role: 'system',
-        text: '✅ Litige résolu par accord mutuel.',
-        ts: new Date().toISOString(),
-      });
-    }
 
-    const newStatus = bothAgreed ? 'resolved' : dispute.status;
+    let newStatus  = dispute.status;
+    let conflict   = false;
+    let bothAgreed = false;
+
+    if (bothProposed) {
+      if (outcomeClient === outcomeCarrier) {
+        // Accord !
+        bothAgreed = true;
+        newStatus  = 'resolved';
+        const [bRows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [dispute.booking_id]);
+        if (bRows.length) {
+          try {
+            await applyDisputeOutcome(bRows[0], outcomeClient);
+          } catch (e) {
+            console.error('Erreur applyDisputeOutcome:', e.message);
+          }
+        }
+        history.push({
+          role: 'system',
+          text: '✅ Litige résolu par accord mutuel — ' + outcomeLabel(outcomeClient) + '.',
+          ts: new Date().toISOString(),
+        });
+      } else {
+        // Désaccord — réinitialiser pour permettre une nouvelle tentative
+        conflict = true;
+        resolvedByClient  = 0;
+        resolvedByCarrier = 0;
+        outcomeClient  = null;
+        outcomeCarrier = null;
+        history.push({
+          role: 'system',
+          text: '⚠️ Vos propositions de résolution diffèrent. Discutez puis proposez une nouvelle résolution.',
+          ts: new Date().toISOString(),
+        });
+      }
+    }
 
     await db.execute(
       `UPDATE disputes
-       SET resolved_by_client = ?, resolved_by_carrier = ?, status = ?, resolution = ?, updated_at = NOW()
+       SET resolved_by_client = ?, resolved_by_carrier = ?,
+           resolution_outcome_client = ?, resolution_outcome_carrier = ?,
+           status = ?, resolution = ?, updated_at = NOW()
        WHERE id = ?`,
-      [resolvedByClient, resolvedByCarrier, newStatus, JSON.stringify(history), dispute.id]
+      [resolvedByClient, resolvedByCarrier, outcomeClient, outcomeCarrier, newStatus, JSON.stringify(history), dispute.id]
     );
 
     res.json({
       success: true,
       bothAgreed,
+      conflict,
       status: newStatus,
       resolvedByClient: !!resolvedByClient,
       resolvedByCarrier: !!resolvedByCarrier,
+      outcomeClient,
+      outcomeCarrier,
       history,
     });
   } catch (err) {
