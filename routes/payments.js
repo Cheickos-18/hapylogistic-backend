@@ -49,7 +49,27 @@ router.post('/intent', auth, async (req, res) => {
       },
     };
 
-    if (client.stripe_customer_id) piParams.customer = client.stripe_customer_id;
+    // Vérifier que le stripe_customer_id stocké existe toujours côté Stripe
+    // (peut être invalide après un changement de mode test/live ou une suppression manuelle)
+    let stripeCustomerId = client.stripe_customer_id;
+    if (stripeCustomerId) {
+      try {
+        const existing = await stripe.customers.retrieve(stripeCustomerId);
+        if (existing.deleted) stripeCustomerId = null;
+      } catch (e) {
+        stripeCustomerId = null;
+      }
+    }
+    if (!stripeCustomerId) {
+      const newCustomer = await stripe.customers.create({
+        email: client.email || undefined,
+        name: `${client.first_name || ''} ${client.last_name || ''}`.trim() || undefined,
+        metadata: { userId: client.id },
+      });
+      stripeCustomerId = newCustomer.id;
+      await db.execute('UPDATE users SET stripe_customer_id = ? WHERE id = ?', [stripeCustomerId, client.id]);
+    }
+    piParams.customer = stripeCustomerId;
     if (listing.stripe_account_id) {
       piParams.transfer_data          = { destination: listing.stripe_account_id, amount: amounts.carrierNet };
       piParams.application_fee_amount = amounts.platformFee;
