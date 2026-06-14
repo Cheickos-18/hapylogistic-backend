@@ -13,7 +13,10 @@ function generatePickupCode() {
 
 // ── POST /api/payments/intent ────────────────
 router.post('/intent', auth, async (req, res) => {
-  const { listingId, weightKg, parcelType, recipientName, recipientPhone, notes } = req.body;
+  // Accepte 'instructions' (nom envoyé par le frontend) avec fallback sur 'notes'
+  const { listingId, weightKg, parcelType, recipientName, recipientPhone, instructions, notes } = req.body;
+  const specialNotes = instructions || notes || null;
+
   if (!listingId || !weightKg) return res.status(400).json({ error: 'listingId et weightKg requis' });
 
   try {
@@ -68,7 +71,7 @@ router.post('/intent', auth, async (req, res) => {
     `, [
       bookingId, listingId, req.user.id, listing.carrier_id,
       parseFloat(weightKg), parcelType || null,
-      recipientName || null, recipientPhone || null, notes || null,
+      recipientName || null, recipientPhone || null, specialNotes,
       base,
       amounts.clientFee  / 100, amounts.carrierFee / 100,
       amounts.clientTotal/ 100, amounts.carrierNet / 100, amounts.platformFee / 100,
