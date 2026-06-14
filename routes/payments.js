@@ -424,10 +424,12 @@ router.get('/bookings/me', auth, async (req, res) => {
     const field = req.user.role === 'carrier' ? 'carrier_id' : 'client_id';
     const [rows] = await db.execute(`
       SELECT b.*, l.origin, l.destination, l.departure_date,
-        u.first_name, u.last_name
+        u.first_name, u.last_name,
+        (r.id IS NOT NULL) AS has_review
       FROM bookings b
       JOIN listings l ON b.listing_id = l.id
       JOIN users u ON u.id = ${field === 'client_id' ? 'b.carrier_id' : 'b.client_id'}
+      LEFT JOIN reviews r ON r.booking_id = b.id AND r.client_id = b.client_id
       WHERE b.${field} = ?
       ORDER BY b.created_at DESC
     `, [req.user.id]);
