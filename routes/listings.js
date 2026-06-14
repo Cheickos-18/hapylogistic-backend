@@ -28,6 +28,17 @@ async function refundListingBookings(listingId, reason) {
   return bookings.length;
 }
 
+// ── Helper : normaliser pickupMode / pickupCities ────────────
+function normalizePickup(pickupMode, pickupCities, fallbackOrigin) {
+  const mode = pickupMode === 'collect' && Array.isArray(pickupCities) && pickupCities.length
+    ? 'collect'
+    : 'dropoff';
+  const cities = mode === 'collect'
+    ? pickupCities.map(c => String(c).trim()).filter(Boolean)
+    : [fallbackOrigin];
+  return { mode, cities };
+}
+
 // ── GET /api/listings ────────────────────────
 router.get('/', async (req, res) => {
   const { destination, type, zone, minKg, maxPrice, level, sort = 'rating' } = req.query;
@@ -60,25 +71,31 @@ router.get('/', async (req, res) => {
 
   try {
     const [rows] = await db.execute(sql, params);
-    const listings = rows.map(r => ({
-      id:           r.id,
-      carrierId:    r.carrier_id,
-      carrierName:  `${r.first_name} ${r.last_name[0]}.`,
-      carrierLevel: r.carrier_level,
-      carrierTrips: r.total_trips,
-      carrierRating:parseFloat(r.average_rating) || 0,
-      from:         r.origin,
-      to:           r.destination,
-      countryFrom:  r.country_from,
-      countryTo:    r.country_to,
-      zone:         r.zone,
-      date:         r.departure_date,
-      kg:           parseFloat(r.available_kg),
-      price:        parseFloat(r.price_per_kg),
-      type:         r.type,
-      description:  r.description,
-      status:       r.status,
-    }));
+    const listings = rows.map(r => {
+      let pickupCities = [];
+      try { pickupCities = r.pickup_cities ? JSON.parse(r.pickup_cities) : []; } catch { pickupCities = []; }
+      return {
+        id:           r.id,
+        carrierId:    r.carrier_id,
+        carrierName:  `${r.first_name} ${r.last_name[0]}.`,
+        carrierLevel: r.carrier_level,
+        carrierTrips: r.total_trips,
+        carrierRating:parseFloat(r.average_rating) || 0,
+        from:         r.origin,
+        to:           r.destination,
+        countryFrom:  r.country_from,
+        countryTo:    r.country_to,
+        zone:         r.zone,
+        date:         r.departure_date,
+        kg:           parseFloat(r.available_kg),
+        price:        parseFloat(r.price_per_kg),
+        type:         r.type,
+        description:  r.description,
+        status:       r.status,
+        pickupMode:   r.pickup_mode || 'dropoff',
+        pickupCities: pickupCities,
+      };
+    });
     res.json({ count: listings.length, listings });
   } catch (err) {
     console.error('Erreur listings:', err.message);
@@ -95,7 +112,12 @@ router.get('/carrier/me', auth, async (req, res) => {
       'SELECT * FROM listings WHERE carrier_id = ? ORDER BY created_at DESC',
       [req.user.id]
     );
-    res.json({ listings: rows });
+    const listings = rows.map(r => {
+      let pickupCities = [];
+      try { pickupCities = r.pickup_cities ? JSON.parse(r.pickup_cities) : []; } catch { pickupCities = []; }
+      return { ...r, pickup_mode: r.pickup_mode || 'dropoff', pickup_cities: pickupCities };
+    });
+    res.json({ listings });
   } catch (err) {
     res.status(500).json({ error: 'Erreur serveur' });
   }
@@ -112,6 +134,8 @@ router.get('/:id', async (req, res) => {
     `, [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Annonce introuvable' });
     const r = rows[0];
+    let pickupCities = [];
+    try { pickupCities = r.pickup_cities ? JSON.parse(r.pickup_cities) : []; } catch { pickupCities = []; }
     res.json({
       id: r.id, carrierId: r.carrier_id,
       carrierName: `${r.first_name} ${r.last_name[0]}.`,
@@ -121,6 +145,8 @@ router.get('/:id', async (req, res) => {
       date: r.departure_date, kg: parseFloat(r.available_kg),
       price: parseFloat(r.price_per_kg), type: r.type,
       description: r.description, status: r.status,
+      pickupMode: r.pickup_mode || 'dropoff',
+      pickupCities: pickupCities,
     });
   } catch (err) {
     res.status(500).json({ error: 'Erreur serveur' });
@@ -132,16 +158,17 @@ router.post('/', auth, async (req, res) => {
   if (req.user.role !== 'carrier') {
     return res.status(403).json({ error: 'Réservé aux transporteurs' });
   }
-  const { origin, destination, countryFrom, countryTo, zone, departureDate, availableKg, pricePerKg, type, description } = req.body;
+  const { origin, destination, countryFrom, countryTo, zone, departureDate, availableKg, pricePerKg, type, description, pickupMode, pickupCities } = req.body;
   if (!origin || !destination || !departureDate || !availableKg || !pricePerKg) {
     return res.status(400).json({ error: 'Champs obligatoires manquants' });
   }
   try {
     const id = require('crypto').randomUUID();
+    const { mode, cities } = normalizePickup(pickupMode, pickupCities, origin);
     await db.execute(`
-      INSERT INTO listings (id, carrier_id, origin, destination, country_from, country_to, zone, departure_date, available_kg, price_per_kg, type, description)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [id, req.user.id, origin, destination, countryFrom||null, countryTo||null, zone||'af', departureDate, parseFloat(availableKg), parseFloat(pricePerKg), type||'air', description||null]);
+      INSERT INTO listings (id, carrier_id, origin, destination, country_from, country_to, zone, departure_date, available_kg, price_per_kg, type, description, pickup_mode, pickup_cities)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [id, req.user.id, origin, destination, countryFrom||null, countryTo||null, zone||'af', departureDate, parseFloat(availableKg), parseFloat(pricePerKg), type||'air', description||null, mode, JSON.stringify(cities)]);
 
     const [rows] = await db.execute('SELECT * FROM listings WHERE id = ?', [id]);
     res.status(201).json({ success: true, listing: rows[0] });
@@ -153,7 +180,7 @@ router.post('/', auth, async (req, res) => {
 
 // ── PATCH /api/listings/:id ──────────────────
 router.patch('/:id', auth, async (req, res) => {
-  const { origin, destination, departureDate, type, availableKg, pricePerKg, description, status } = req.body;
+  const { origin, destination, departureDate, type, availableKg, pricePerKg, description, status, pickupMode, pickupCities } = req.body;
   try {
     const [rows] = await db.execute(
       'SELECT * FROM listings WHERE id = ? AND carrier_id = ?',
@@ -183,6 +210,13 @@ router.patch('/:id', auth, async (req, res) => {
     if (pricePerKg    !== undefined) { updates.push('price_per_kg = ?');  params.push(parseFloat(pricePerKg)); }
     if (description   !== undefined) { updates.push('description = ?');   params.push(description); }
     if (status        !== undefined) { updates.push('status = ?');        params.push(status); }
+
+    if (pickupMode !== undefined || pickupCities !== undefined) {
+      const effectiveOrigin = origin !== undefined ? origin : listing.origin;
+      const { mode, cities } = normalizePickup(pickupMode, pickupCities, effectiveOrigin);
+      updates.push('pickup_mode = ?');   params.push(mode);
+      updates.push('pickup_cities = ?'); params.push(JSON.stringify(cities));
+    }
 
     if (!updates.length) return res.status(400).json({ error: 'Aucune donnée à mettre à jour' });
 
