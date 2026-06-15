@@ -189,14 +189,16 @@ router.patch('/:id', auth, async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'Annonce introuvable ou non autorisé' });
     const listing = rows[0];
 
+    let refundedBookings = 0;
+
     // Si mise en pause → rembourser les réservations paid
     if (status && status === 'inactive' && listing.status === 'active') {
-      await refundListingBookings(req.params.id, 'listing_paused');
+      refundedBookings += await refundListingBookings(req.params.id, 'listing_paused');
     }
 
     // Si le prix augmente de plus de 20% → rembourser les réservations paid
     if (pricePerKg && parseFloat(pricePerKg) > parseFloat(listing.price_per_kg) * 1.2) {
-      await refundListingBookings(req.params.id, 'price_increase');
+      refundedBookings += await refundListingBookings(req.params.id, 'price_increase');
     }
 
     const updates = [];
@@ -223,7 +225,7 @@ router.patch('/:id', auth, async (req, res) => {
     params.push(req.params.id);
     await db.execute(`UPDATE listings SET ${updates.join(', ')} WHERE id = ?`, params);
     const [updated] = await db.execute('SELECT * FROM listings WHERE id = ?', [req.params.id]);
-    res.json({ success: true, listing: updated[0] });
+    res.json({ success: true, listing: updated[0], refundedBookings });
   } catch (err) {
     console.error('Erreur patch listing:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });
