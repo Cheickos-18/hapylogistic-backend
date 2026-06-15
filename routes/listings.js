@@ -158,6 +158,25 @@ router.post('/', auth, async (req, res) => {
   if (req.user.role !== 'carrier') {
     return res.status(403).json({ error: 'Réservé aux transporteurs' });
   }
+
+  // ── Vérification KYC ──────────────────────────────────────
+  // Le JWT ne contient pas le statut à jour (il peut avoir changé
+  // depuis la connexion, via le webhook Stripe account.updated).
+  // On bloque la publication tant que la vérification d'identité
+  // Stripe Connect n'est pas terminée.
+  try {
+    const [userRows] = await db.execute('SELECT status FROM users WHERE id = ?', [req.user.id]);
+    if (!userRows.length || userRows[0].status === 'pending_kyc') {
+      return res.status(403).json({
+        error: "Vérification d'identité requise avant de publier une annonce.",
+        kycRequired: true
+      });
+    }
+  } catch (err) {
+    console.error('Erreur vérification KYC:', err.message);
+    return res.status(500).json({ error: 'Erreur serveur' });
+  }
+
   const { origin, destination, countryFrom, countryTo, zone, departureDate, availableKg, pricePerKg, type, description, pickupMode, pickupCities } = req.body;
   if (!origin || !destination || !departureDate || !availableKg || !pricePerKg) {
     return res.status(400).json({ error: 'Champs obligatoires manquants' });
