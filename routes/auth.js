@@ -373,4 +373,38 @@ router.get('/me', require('../middleware/auth'), async (req, res) => {
   }
 });
 
+// ── POST /api/auth/onboarding-link ───────────
+// Régénère un lien d'onboarding Stripe Connect pour un transporteur
+// dont la vérification KYC est en attente (lien initial expiré ou
+// abandonné avant la fin du process Stripe).
+router.post('/onboarding-link', require('../middleware/auth'), async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      'SELECT role, status, stripe_account_id FROM users WHERE id = ?',
+      [req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    const u = rows[0];
+
+    if (u.role !== 'carrier') {
+      return res.status(403).json({ error: 'Réservé aux transporteurs' });
+    }
+    if (!u.stripe_account_id) {
+      return res.status(400).json({ error: 'Aucun compte Stripe associé à ce profil' });
+    }
+
+    const accountLink = await stripe.accountLinks.create({
+      account: u.stripe_account_id,
+      refresh_url: `${process.env.FRONTEND_URL}/pages/dashboard-carrier.html`,
+      return_url:  `${process.env.FRONTEND_URL}/pages/dashboard-carrier.html`,
+      type: 'account_onboarding'
+    });
+
+    res.json({ url: accountLink.url });
+  } catch (err) {
+    console.error('Erreur onboarding-link:', err.message);
+    res.status(500).json({ error: 'Impossible de générer le lien de vérification' });
+  }
+});
+
 module.exports = router;
