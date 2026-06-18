@@ -35,6 +35,18 @@ app.use(cors(corsOptions));
 // Répondre immédiatement aux preflight OPTIONS (avant le rate limiter)
 app.options('*', cors(corsOptions));
 
+// ── Supprime le slash final pour éviter les redirections 307 de Hostinger ──
+// Hostinger normalise les URLs en ajoutant un slash final, ce qui génère un
+// 307 sans headers CORS → bloqué par le navigateur. On corrige en aval.
+app.use((req, res, next) => {
+  if (req.path !== '/' && req.path.endsWith('/')) {
+    const cleanPath = req.path.slice(0, -1);
+    const query = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+    return res.redirect(301, cleanPath + query);
+  }
+  next();
+});
+
 // Rate limiting
 app.set('trust proxy', 1);
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200 });
