@@ -4,6 +4,30 @@ const router  = express.Router();
 const db      = require('../config/database');
 const auth    = require('../middleware/auth');
 
+// ── GET /api/messages/unread/counts ──────────────────────────
+// Nombre de messages non lus, regroupés par réservation, pour
+// l'utilisateur connecté (badge 💬 sur les listes de réservations
+// du dashboard — évite un appel par réservation).
+// IMPORTANT : doit être déclarée AVANT GET /:bookingId, sinon Express
+// route '/unread/counts' vers le handler générique avec bookingId='unread'.
+router.get('/unread/counts', auth, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      `SELECT booking_id, COUNT(*) AS count
+       FROM messages
+       WHERE receiver_id = ? AND is_read = 0
+       GROUP BY booking_id`,
+      [req.user.id]
+    );
+    const counts = {};
+    rows.forEach(r => { counts[r.booking_id] = Number(r.count); });
+    res.json({ counts });
+  } catch (err) {
+    console.error('Erreur GET /messages/unread/counts:', err.message);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
 // ── GET /api/messages/:bookingId ─────────────────────────────
 // Récupère tous les messages d'une réservation (polling)
 router.get('/:bookingId', auth, async (req, res) => {
@@ -98,28 +122,6 @@ router.post('/:bookingId', auth, async (req, res) => {
     });
   } catch (err) {
     console.error('Erreur POST /messages:', err.message);
-    res.status(500).json({ error: 'Erreur serveur' });
-  }
-});
-
-// ── GET /api/messages/unread/counts ──────────────────────────
-// Nombre de messages non lus, regroupés par réservation, pour
-// l'utilisateur connecté (badge 💬 sur les listes de réservations
-// du dashboard — évite un appel par réservation).
-router.get('/unread/counts', auth, async (req, res) => {
-  try {
-    const [rows] = await db.execute(
-      `SELECT booking_id, COUNT(*) AS count
-       FROM messages
-       WHERE receiver_id = ? AND is_read = 0
-       GROUP BY booking_id`,
-      [req.user.id]
-    );
-    const counts = {};
-    rows.forEach(r => { counts[r.booking_id] = Number(r.count); });
-    res.json({ counts });
-  } catch (err) {
-    console.error('Erreur GET /messages/unread/counts:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
