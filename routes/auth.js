@@ -207,7 +207,7 @@ function generateToken(user) {
 
 // ── POST /api/auth/register ──────────────────
 router.post('/register', async (req, res) => {
-  const { firstName, lastName, email, password, phone, role, country, carrierType, destination } = req.body;
+  const { firstName, lastName, email, password, phone, role, country, carrierType, destination, carrierAccountType, companyName } = req.body;
 
   if (!firstName || !lastName || !email || !password || !role) {
     return res.status(400).json({ error: 'Champs obligatoires manquants' });
@@ -238,13 +238,30 @@ router.post('/register', async (req, res) => {
         });
         stripeCustomerId = customer.id;
       } else {
-        const account = await stripe.accounts.create({
+        // ── Type de compte : particulier (individual) ou entreprise (company) ──
+        // Par défaut 'individual' (cas actuel, le champ n'est pas exposé dans l'UI).
+        // Prêt pour le jour où on activera le choix côté formulaire.
+        const accountType = ['individual', 'company'].includes(carrierAccountType)
+          ? carrierAccountType
+          : 'individual';
+
+        const stripeAccountParams = {
           type: 'express', country: 'FR', email,
           capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
-          business_type: 'individual',
-          individual: { first_name: firstName, last_name: lastName, email, phone },
-          metadata: { role, carrierType: carrierType || 'air' }
-        });
+          business_type: accountType,
+          metadata: { role, carrierType: carrierType || 'air', accountType }
+        };
+
+        if (accountType === 'individual') {
+          stripeAccountParams.individual = { first_name: firstName, last_name: lastName, email, phone };
+        } else {
+          // Entreprise : Stripe attend un objet 'company' avec le nom de la société,
+          // et un représentant légal dans 'individual' (le déclarant = la personne qui s'inscrit).
+          stripeAccountParams.company    = { name: companyName || `${firstName} ${lastName}` };
+          stripeAccountParams.individual = { first_name: firstName, last_name: lastName, email, phone };
+        }
+
+        const account = await stripe.accounts.create(stripeAccountParams);
         stripeAccountId = account.id;
 
         const accountLink = await stripe.accountLinks.create({
