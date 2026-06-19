@@ -68,9 +68,14 @@ router.post('/intent', auth, async (req, res) => {
     }
     piParams.customer = stripeCustomerId;
 
+    // ── CORRECTION FINALE : utiliser transfer_data[amount] = carrierNet
+    // Stripe transfère exactement carrierNet à Bay, la différence reste sur la plateforme.
+    // C'est l'approche documentée et fiable pour capture manuelle + Connect.
     if (listing.stripe_account_id) {
-      piParams.transfer_data          = { destination: listing.stripe_account_id };
-      piParams.application_fee_amount = amounts.platformFee;
+      piParams.transfer_data = {
+        destination: listing.stripe_account_id,
+        amount:      amounts.carrierNet,
+      };
     }
 
     const pi = await stripe.paymentIntents.create(piParams);
@@ -234,7 +239,6 @@ router.post('/confirm-delivery/:id', auth, async (req, res) => {
 });
 
 // ── POST /api/payments/confirm-receipt/:id ───────────────────
-// Réservé au CLIENT — confirme la réception → capture Stripe
 router.post('/confirm-receipt/:id', auth, async (req, res) => {
   try {
     const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
@@ -248,11 +252,9 @@ router.post('/confirm-receipt/:id', auth, async (req, res) => {
       return res.status(400).json({ error: 'Le transporteur n\'a pas encore marqué la livraison' });
     }
 
-    // ── CORRECTION : passer application_fee_amount à la capture
-    // Avec capture_method:'manual', la commission doit être spécifiée au moment de la capture
-    await stripe.paymentIntents.capture(booking.payment_intent_id, {
-      application_fee_amount: Math.round(parseFloat(booking.platform_fee) * 100)
-    });
+    // Capture simple — transfer_data[amount] défini à la création gère automatiquement
+    // le split : carrierNet part à Bay, le reste reste sur la plateforme
+    await stripe.paymentIntents.capture(booking.payment_intent_id);
 
     await db.execute(
       'UPDATE bookings SET status = ?, receipt_confirmed_at = NOW() WHERE id = ?',
@@ -298,9 +300,7 @@ router.post('/capture/:id', auth, async (req, res) => {
       return res.status(400).json({ error: 'La livraison doit être confirmée d\'abord' });
     }
 
-    await stripe.paymentIntents.capture(booking.payment_intent_id, {
-      application_fee_amount: Math.round(parseFloat(booking.platform_fee) * 100)
-    });
+    await stripe.paymentIntents.capture(booking.payment_intent_id);
     await db.execute('UPDATE bookings SET status = ? WHERE id = ?', ['completed', booking.id]);
     await db.execute(
       'UPDATE users SET total_trips = total_trips + 1 WHERE id = ?',
@@ -383,9 +383,9 @@ router.post('/dispute/:id', auth, async (req, res) => {
     `, [disputeId, booking.id, booking.client_id, booking.carrier_id, reason || null, description || null, booking.payment_intent_id]);
 
     try {
-      const [listings]   = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
-      const [clientRows] = await db.execute('SELECT * FROM users WHERE id = ?', [booking.client_id]);
-      const [carrierRows]= await db.execute('SELECT * FROM users WHERE id = ?', [booking.carrier_id]);
+      const [listings]    = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
+      const [clientRows]  = await db.execute('SELECT * FROM users WHERE id = ?', [booking.client_id]);
+      const [carrierRows] = await db.execute('SELECT * FROM users WHERE id = ?', [booking.carrier_id]);
       if (listings.length && clientRows.length && carrierRows.length) {
         await email.sendDisputeOpened({
           clientEmail:  clientRows[0].email,
