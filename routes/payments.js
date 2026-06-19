@@ -13,7 +13,6 @@ function generatePickupCode() {
 
 // ── POST /api/payments/intent ────────────────
 router.post('/intent', auth, async (req, res) => {
-  // Accepte 'instructions' (nom envoyé par le frontend) avec fallback sur 'notes'
   const { listingId, weightKg, parcelType, recipientName, recipientPhone, instructions, notes } = req.body;
   const specialNotes = instructions || notes || null;
 
@@ -49,8 +48,6 @@ router.post('/intent', auth, async (req, res) => {
       },
     };
 
-    // Vérifier que le stripe_customer_id stocké existe toujours côté Stripe
-    // (peut être invalide après un changement de mode test/live ou une suppression manuelle)
     let stripeCustomerId = client.stripe_customer_id;
     if (stripeCustomerId) {
       try {
@@ -71,8 +68,6 @@ router.post('/intent', auth, async (req, res) => {
     }
     piParams.customer = stripeCustomerId;
 
-    // ── CORRECTION : application_fee_amount et transfer_data[amount] sont mutuellement exclusifs
-    // On utilise uniquement application_fee_amount — Stripe calcule automatiquement le net transporteur
     if (listing.stripe_account_id) {
       piParams.transfer_data          = { destination: listing.stripe_account_id };
       piParams.application_fee_amount = amounts.platformFee;
@@ -80,7 +75,6 @@ router.post('/intent', auth, async (req, res) => {
 
     const pi = await stripe.paymentIntents.create(piParams);
 
-    // Générer le code de collecte
     const pickupCode = generatePickupCode();
     const bookingId  = require('crypto').randomUUID();
 
@@ -109,11 +103,6 @@ router.post('/intent', auth, async (req, res) => {
       "UPDATE listings SET status = 'inactive' WHERE id = ? AND available_kg <= 0",
       [listingId]
     );
-
-    // ── Emails de confirmation (après paiement confirmé via webhook) ──
-    // Les emails sont envoyés depuis le webhook Stripe (event: payment_intent.succeeded)
-    // car ici le paiement n'est pas encore confirmé (statut: awaiting_payment)
-    // Voir routes/webhooks.js pour l'envoi des emails post-paiement
 
     res.json({
       success: true,
@@ -157,7 +146,6 @@ router.get('/bookings/:id/pickup-code', auth, async (req, res) => {
 });
 
 // ── POST /api/payments/confirm-pickup/:id ────────────────────
-// Réservé au TRANSPORTEUR — soumet le code de collecte
 router.post('/confirm-pickup/:id', auth, async (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Code requis' });
@@ -182,7 +170,6 @@ router.post('/confirm-pickup/:id', auth, async (req, res) => {
       ['in_transit', booking.id]
     );
 
-    // ── Email : collecte confirmée → notification client ──
     try {
       const [listings] = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
       const [clientRows] = await db.execute('SELECT * FROM users WHERE id = ?', [booking.client_id]);
@@ -206,7 +193,6 @@ router.post('/confirm-pickup/:id', auth, async (req, res) => {
 });
 
 // ── POST /api/payments/confirm-delivery/:id ──────────────────
-// Réservé au TRANSPORTEUR — marque le colis comme livré
 router.post('/confirm-delivery/:id', auth, async (req, res) => {
   try {
     const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
@@ -225,7 +211,6 @@ router.post('/confirm-delivery/:id', auth, async (req, res) => {
       ['delivered', booking.id]
     );
 
-    // ── Email : livraison marquée → demande confirmation au client ──
     try {
       const [listings] = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
       const [clientRows] = await db.execute('SELECT * FROM users WHERE id = ?', [booking.client_id]);
@@ -263,7 +248,12 @@ router.post('/confirm-receipt/:id', auth, async (req, res) => {
       return res.status(400).json({ error: 'Le transporteur n\'a pas encore marqué la livraison' });
     }
 
-    await stripe.paymentIntents.capture(booking.payment_intent_id);
+    // ── CORRECTION : passer application_fee_amount à la capture
+    // Avec capture_method:'manual', la commission doit être spécifiée au moment de la capture
+    await stripe.paymentIntents.capture(booking.payment_intent_id, {
+      application_fee_amount: Math.round(parseFloat(booking.platform_fee) * 100)
+    });
+
     await db.execute(
       'UPDATE bookings SET status = ?, receipt_confirmed_at = NOW() WHERE id = ?',
       ['completed', booking.id]
@@ -273,7 +263,6 @@ router.post('/confirm-receipt/:id', auth, async (req, res) => {
       [booking.carrier_id]
     );
 
-    // ── Email : réception confirmée → paiement viré au transporteur ──
     try {
       const [listings]  = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
       const [carriers]  = await db.execute('SELECT * FROM users WHERE id = ?', [booking.carrier_id]);
@@ -309,7 +298,9 @@ router.post('/capture/:id', auth, async (req, res) => {
       return res.status(400).json({ error: 'La livraison doit être confirmée d\'abord' });
     }
 
-    await stripe.paymentIntents.capture(booking.payment_intent_id);
+    await stripe.paymentIntents.capture(booking.payment_intent_id, {
+      application_fee_amount: Math.round(parseFloat(booking.platform_fee) * 100)
+    });
     await db.execute('UPDATE bookings SET status = ? WHERE id = ?', ['completed', booking.id]);
     await db.execute(
       'UPDATE users SET total_trips = total_trips + 1 WHERE id = ?',
@@ -352,7 +343,6 @@ router.post('/refund/:id', auth, async (req, res) => {
       [parseFloat(booking.weight_kg), 'active', booking.listing_id]
     );
 
-    // ── Email : remboursement au client ──
     try {
       const [listings]   = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
       const [clientRows] = await db.execute('SELECT * FROM users WHERE id = ?', [booking.client_id]);
@@ -392,7 +382,6 @@ router.post('/dispute/:id', auth, async (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `, [disputeId, booking.id, booking.client_id, booking.carrier_id, reason || null, description || null, booking.payment_intent_id]);
 
-    // ── Emails : litige ouvert → client + transporteur + support ──
     try {
       const [listings]   = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
       const [clientRows] = await db.execute('SELECT * FROM users WHERE id = ?', [booking.client_id]);
