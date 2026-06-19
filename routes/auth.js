@@ -239,8 +239,6 @@ router.post('/register', async (req, res) => {
         stripeCustomerId = customer.id;
       } else {
         // ── Type de compte : particulier (individual) ou entreprise (company) ──
-        // Par défaut 'individual' (cas actuel, le champ n'est pas exposé dans l'UI).
-        // Prêt pour le jour où on activera le choix côté formulaire.
         const accountType = ['individual', 'company'].includes(carrierAccountType)
           ? carrierAccountType
           : 'individual';
@@ -255,8 +253,6 @@ router.post('/register', async (req, res) => {
         if (accountType === 'individual') {
           stripeAccountParams.individual = { first_name: firstName, last_name: lastName, email, phone };
         } else {
-          // Entreprise : Stripe attend un objet 'company' avec le nom de la société,
-          // et un représentant légal dans 'individual' (le déclarant = la personne qui s'inscrit).
           stripeAccountParams.company    = { name: companyName || `${firstName} ${lastName}` };
           stripeAccountParams.individual = { first_name: firstName, last_name: lastName, email, phone };
         }
@@ -273,7 +269,18 @@ router.post('/register', async (req, res) => {
         onboardingUrl = accountLink.url;
       }
     } catch (stripeErr) {
-      console.warn('Stripe warning:', stripeErr.message);
+      // ── MODIF 1 : bloquer l'inscription si Stripe échoue pour un transporteur ──
+      // Sans stripe_account_id, le transporteur ne pourra jamais recevoir de paiements.
+      // On retourne une erreur claire plutôt que de créer un compte inutilisable.
+      if (role === 'carrier') {
+        console.error('Stripe account creation failed for carrier:', stripeErr.message);
+        return res.status(502).json({
+          error: 'Impossible de créer votre compte de paiement Stripe. Vérifiez votre connexion et réessayez.',
+          stripeError: true,
+        });
+      }
+      // Pour les clients, Stripe Customer est optionnel — on continue sans.
+      console.warn('Stripe customer creation failed (non-blocking):', stripeErr.message);
     }
 
     // Insérer en base
@@ -308,7 +315,6 @@ router.post('/register', async (req, res) => {
         html: template.html,
       });
     } catch (emailErr) {
-      // Ne pas bloquer l'inscription si l'email échoue
       console.warn('Email bienvenue non envoyé:', emailErr.message);
     }
 
@@ -371,10 +377,12 @@ router.post('/login', async (req, res) => {
 });
 
 // ── GET /api/auth/me ─────────────────────────
+// MODIF 2 : ajout de stripe_account_id dans le SELECT
+//           + hasStripeAccount dans la réponse
 router.get('/me', require('../middleware/auth'), async (req, res) => {
   try {
     const [rows] = await db.execute(
-      'SELECT id, first_name, last_name, email, phone, role, country, status, carrier_level, carrier_type, total_trips, average_rating FROM users WHERE id = ?',
+      'SELECT id, first_name, last_name, email, phone, role, country, status, carrier_level, carrier_type, total_trips, average_rating, stripe_account_id FROM users WHERE id = ?',
       [req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Utilisateur introuvable' });
@@ -384,6 +392,7 @@ router.get('/me', require('../middleware/auth'), async (req, res) => {
       email: u.email, phone: u.phone, role: u.role, country: u.country,
       status: u.status, level: u.carrier_level, carrierType: u.carrier_type,
       totalTrips: u.total_trips, rating: parseFloat(u.average_rating) || 0,
+      hasStripeAccount: !!u.stripe_account_id,
     });
   } catch (err) {
     res.status(500).json({ error: 'Erreur serveur' });
@@ -421,6 +430,73 @@ router.post('/onboarding-link', require('../middleware/auth'), async (req, res) 
   } catch (err) {
     console.error('Erreur onboarding-link:', err.message);
     res.status(500).json({ error: 'Impossible de générer le lien de vérification' });
+  }
+});
+
+// ── POST /api/auth/create-stripe-account ─────
+// MODIF 3 : nouvel endpoint
+// Crée le compte Stripe Connect manquant puis génère un lien KYC.
+// Cas : transporteur inscrit avant que Stripe soit opérationnel,
+// ou dont la création Stripe a échoué silencieusement à l'inscription.
+// Si le compte existe déjà, génère simplement un nouveau lien KYC.
+router.post('/create-stripe-account', require('../middleware/auth'), async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      'SELECT role, status, stripe_account_id, first_name, last_name, email, phone FROM users WHERE id = ?',
+      [req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    const u = rows[0];
+
+    if (u.role !== 'carrier') {
+      return res.status(403).json({ error: 'Réservé aux transporteurs' });
+    }
+
+    // Si le compte Stripe existe déjà, générer juste un nouveau lien KYC
+    if (u.stripe_account_id) {
+      const accountLink = await stripe.accountLinks.create({
+        account: u.stripe_account_id,
+        refresh_url: `${process.env.FRONTEND_URL}/pages/dashboard-carrier.html`,
+        return_url:  `${process.env.FRONTEND_URL}/pages/dashboard-carrier.html`,
+        type: 'account_onboarding'
+      });
+      return res.json({ url: accountLink.url });
+    }
+
+    // Créer le compte Stripe Connect Express
+    const account = await stripe.accounts.create({
+      type: 'express',
+      country: 'FR',
+      email: u.email,
+      capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
+      business_type: 'individual',
+      individual: {
+        first_name: u.first_name,
+        last_name:  u.last_name,
+        email:      u.email,
+        phone:      u.phone,
+      },
+      metadata: { userId: req.user.id, role: 'carrier' }
+    });
+
+    // Sauvegarder le stripe_account_id en base
+    await db.execute(
+      'UPDATE users SET stripe_account_id = ? WHERE id = ?',
+      [account.id, req.user.id]
+    );
+
+    // Générer le lien KYC
+    const accountLink = await stripe.accountLinks.create({
+      account: account.id,
+      refresh_url: `${process.env.FRONTEND_URL}/pages/dashboard-carrier.html`,
+      return_url:  `${process.env.FRONTEND_URL}/pages/dashboard-carrier.html`,
+      type: 'account_onboarding'
+    });
+
+    res.json({ url: accountLink.url });
+  } catch (err) {
+    console.error('Erreur create-stripe-account:', err.message);
+    res.status(500).json({ error: 'Impossible de créer le compte Stripe : ' + err.message });
   }
 });
 
