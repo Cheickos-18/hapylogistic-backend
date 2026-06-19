@@ -70,8 +70,11 @@ router.post('/intent', auth, async (req, res) => {
       await db.execute('UPDATE users SET stripe_customer_id = ? WHERE id = ?', [stripeCustomerId, client.id]);
     }
     piParams.customer = stripeCustomerId;
+
+    // ── CORRECTION : application_fee_amount et transfer_data[amount] sont mutuellement exclusifs
+    // On utilise uniquement application_fee_amount — Stripe calcule automatiquement le net transporteur
     if (listing.stripe_account_id) {
-      piParams.transfer_data          = { destination: listing.stripe_account_id, amount: amounts.carrierNet };
+      piParams.transfer_data          = { destination: listing.stripe_account_id };
       piParams.application_fee_amount = amounts.platformFee;
     }
 
