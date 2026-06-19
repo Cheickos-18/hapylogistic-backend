@@ -496,7 +496,23 @@ router.post('/create-stripe-account', require('../middleware/auth'), async (req,
     res.json({ url: accountLink.url });
   } catch (err) {
     console.error('Erreur create-stripe-account:', err.message);
-    res.status(500).json({ error: 'Impossible de créer le compte Stripe : ' + err.message });
+
+    // ── Traduire les erreurs Stripe en messages lisibles ──────────
+    let userMessage = 'Une erreur est survenue. Réessayez dans quelques instants.';
+
+    if (err.message && err.message.includes('signed up for Connect')) {
+      userMessage = 'La plateforme de paiement n\'est pas encore configurée. Contactez le support : contact@hapylogistic.com';
+    } else if (err.message && err.message.includes('not a valid phone number')) {
+      userMessage = 'Votre numéro de téléphone est invalide. Mettez-le à jour dans votre profil au format international (+33...).';
+    } else if (err.message && err.message.includes('email')) {
+      userMessage = 'Votre adresse email est invalide ou déjà utilisée sur Stripe.';
+    } else if (err.type === 'StripeConnectionError') {
+      userMessage = 'Impossible de contacter Stripe. Vérifiez votre connexion et réessayez.';
+    } else if (err.type === 'StripeAuthenticationError') {
+      userMessage = 'Erreur de configuration Stripe. Contactez le support : contact@hapylogistic.com';
+    }
+
+    res.status(500).json({ error: userMessage });
   }
 });
 
