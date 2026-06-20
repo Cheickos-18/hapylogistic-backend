@@ -26,11 +26,14 @@ const BASE_URL = 'https://hapylogistic.com';
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function formatCurrency(amount) {
-  return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' }).format(amount);
+  const n = Number(amount);
+  return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' }).format(isNaN(n) ? 0 : n);
 }
 
 function formatDate(dateStr) {
-  return new Date(dateStr).toLocaleDateString('fr-FR', {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('fr-FR', {
     day: 'numeric', month: 'long', year: 'numeric'
   });
 }
@@ -101,9 +104,16 @@ function wrapEmail({ title, previewText, body }) {
 }
 
 // ── 1. Confirmation de réservation au client ──────────────────────────────────
+// CORRECTION : utilisation des champs snake_case tels que retournés par MySQL
+// (booking.weight_kg, listing.price_per_kg, listing.departure_date)
+// + lecture directe des montants déjà calculés et stockés en BDD (booking.base_amount,
+//   booking.client_fee, booking.client_total) plutôt que de les recalculer.
 
 async function sendBookingConfirmation({ to, firstName, booking, listing, pickupCode }) {
-  const fees = calculateFees(listing.pricePerKg * booking.weight);
+  const weight       = booking.weight_kg ?? booking.weight;
+  const base         = booking.base_amount;
+  const clientFee    = booking.client_fee;
+  const clientTotal  = booking.client_total;
 
   const html = wrapEmail({
     title: 'Votre réservation est confirmée — HapyLogistic',
@@ -135,11 +145,11 @@ async function sendBookingConfirmation({ to, firstName, booking, listing, pickup
           </div>
           <div class="info-item">
             <div class="info-label">Date de départ</div>
-            <div class="info-value">${formatDate(listing.departureDate)}</div>
+            <div class="info-value">${formatDate(listing.departure_date)}</div>
           </div>
           <div class="info-item">
             <div class="info-label">Poids réservé</div>
-            <div class="info-value">${booking.weight} kg</div>
+            <div class="info-value">${weight} kg</div>
           </div>
         </div>
       </div>
@@ -149,15 +159,15 @@ async function sendBookingConfirmation({ to, firstName, booking, listing, pickup
         <div class="info-grid">
           <div class="info-item">
             <div class="info-label">Prix de base</div>
-            <div class="info-value">${formatCurrency(fees.base)}</div>
+            <div class="info-value">${formatCurrency(base)}</div>
           </div>
           <div class="info-item">
             <div class="info-label">Frais de service (8%)</div>
-            <div class="info-value">${formatCurrency(fees.clientFee)}</div>
+            <div class="info-value">${formatCurrency(clientFee)}</div>
           </div>
           <div class="info-item" style="grid-column:1/-1;background:#6c63ff08;border:1px solid #6c63ff20">
             <div class="info-label">Total payé</div>
-            <div class="info-value" style="font-size:18px;color:#6c63ff">${formatCurrency(fees.clientTotal)}</div>
+            <div class="info-value" style="font-size:18px;color:#6c63ff">${formatCurrency(clientTotal)}</div>
           </div>
         </div>
       </div>
@@ -185,11 +195,12 @@ async function sendBookingConfirmation({ to, firstName, booking, listing, pickup
 // ── 2. Nouvelle réservation au transporteur ───────────────────────────────────
 
 async function sendNewBookingToCarrier({ to, carrierFirstName, booking, listing, client }) {
-  const fees = calculateFees(listing.pricePerKg * booking.weight);
+  const weight     = booking.weight_kg ?? booking.weight;
+  const carrierNet = booking.carrier_net;
 
   const html = wrapEmail({
     title: 'Nouvelle réservation reçue — HapyLogistic',
-    previewText: `${client.firstName} a réservé ${booking.weight}kg sur votre trajet ${listing.origin} → ${listing.destination}`,
+    previewText: `${client.firstName} a réservé ${weight}kg sur votre trajet ${listing.origin} → ${listing.destination}`,
     body: `
       <h1>Nouvelle réservation ! 📬</h1>
       <p class="subtitle">Bonjour ${carrierFirstName}, vous avez reçu une nouvelle réservation sur votre annonce.</p>
@@ -207,11 +218,11 @@ async function sendNewBookingToCarrier({ to, carrierFirstName, booking, listing,
         <div class="info-grid">
           <div class="info-item">
             <div class="info-label">Poids</div>
-            <div class="info-value">${booking.weight} kg</div>
+            <div class="info-value">${weight} kg</div>
           </div>
           <div class="info-item">
             <div class="info-label">Votre gain net</div>
-            <div class="info-value" style="color:#10b981">${formatCurrency(fees.carrierNet)}</div>
+            <div class="info-value" style="color:#10b981">${formatCurrency(carrierNet)}</div>
           </div>
           <div class="info-item">
             <div class="info-label">Trajet</div>
@@ -219,16 +230,16 @@ async function sendNewBookingToCarrier({ to, carrierFirstName, booking, listing,
           </div>
           <div class="info-item">
             <div class="info-label">Date de départ</div>
-            <div class="info-value">${formatDate(listing.departureDate)}</div>
+            <div class="info-value">${formatDate(listing.departure_date)}</div>
           </div>
         </div>
       </div>
 
-      ${booking.description ? `
+      ${booking.special_notes ? `
       <div class="section">
         <div class="section-title">📝 Description du colis</div>
         <div class="info-item">
-          <div class="info-value" style="font-weight:400;font-size:14px;line-height:1.6">${booking.description}</div>
+          <div class="info-value" style="font-weight:400;font-size:14px;line-height:1.6">${booking.special_notes}</div>
         </div>
       </div>
       ` : ''}
@@ -248,7 +259,7 @@ async function sendNewBookingToCarrier({ to, carrierFirstName, booking, listing,
   return resend.emails.send({
     from: FROM_EMAIL,
     to,
-    subject: `📬 Nouvelle réservation — ${booking.weight}kg · ${listing.origin} → ${listing.destination}`,
+    subject: `📬 Nouvelle réservation — ${weight}kg · ${listing.origin} → ${listing.destination}`,
     html,
   });
 }
@@ -312,6 +323,8 @@ async function sendPickupConfirmed({ to, firstName, booking, listing }) {
 // ── 4. Livraison marquée → demande confirmation au client ─────────────────────
 
 async function sendDeliveryRequest({ to, firstName, booking, listing }) {
+  const weight = booking.weight_kg ?? booking.weight;
+
   const html = wrapEmail({
     title: 'Confirmez la réception de votre colis — HapyLogistic',
     previewText: `Le transporteur a marqué votre colis comme livré. Confirmez la réception pour libérer le paiement.`,
@@ -332,7 +345,7 @@ async function sendDeliveryRequest({ to, firstName, booking, listing }) {
           </div>
           <div class="info-item">
             <div class="info-label">Poids</div>
-            <div class="info-value">${booking.weight} kg</div>
+            <div class="info-value">${weight} kg</div>
           </div>
         </div>
       </div>
@@ -358,8 +371,13 @@ async function sendDeliveryRequest({ to, firstName, booking, listing }) {
 }
 
 // ── 5. Réception confirmée → paiement envoyé au transporteur ─────────────────
+// CORRECTION : la commission est lue depuis booking.platform_fee (déjà calculée
+// et stockée en BDD) plutôt que recalculée depuis listing.pricePerKg (undefined)
 
 async function sendReceiptConfirmed({ to, carrierFirstName, booking, listing, netAmount }) {
+  const weight       = booking.weight_kg ?? booking.weight;
+  const platformFee  = booking.platform_fee;
+
   const html = wrapEmail({
     title: 'Paiement en cours de virement — HapyLogistic',
     previewText: `Le client a confirmé la réception. Votre virement de ${formatCurrency(netAmount)} est en route !`,
@@ -380,11 +398,11 @@ async function sendReceiptConfirmed({ to, carrierFirstName, booking, listing, ne
           </div>
           <div class="info-item">
             <div class="info-label">Poids transporté</div>
-            <div class="info-value">${booking.weight} kg</div>
+            <div class="info-value">${weight} kg</div>
           </div>
           <div class="info-item">
-            <div class="info-label">Commission HapyLogistic (7%)</div>
-            <div class="info-value" style="color:#ef4444">− ${formatCurrency(listing.pricePerKg * booking.weight * 0.07)}</div>
+            <div class="info-label">Commission HapyLogistic</div>
+            <div class="info-value" style="color:#ef4444">− ${formatCurrency(platformFee)}</div>
           </div>
           <div class="info-item" style="background:#f0fdf4;border:1px solid #bbf7d0">
             <div class="info-label">Montant net viré</div>
@@ -557,13 +575,6 @@ async function sendDisputeOpened({ clientEmail, carrierEmail, client, carrier, b
     resend.emails.send({ from: FROM_EMAIL, to: carrierEmail, subject: `⚠️ Litige ouvert sur votre trajet ${listing.origin} → ${listing.destination}`, html: carrierHtml }),
     resend.emails.send({ from: FROM_EMAIL, to: SUPPORT_EMAIL, subject: `[LITIGE] #${booking.id?.slice(0,8).toUpperCase()} — ${client.firstName} vs ${carrier.firstName}`, html: supportHtml }),
   ]);
-}
-
-// ── Helper fees (copié de shared-v7.js) ──────────────────────────────────────
-function calculateFees(base) {
-  const clientFee   = Math.round(base * 0.08 * 100) / 100;
-  const carrierFee  = Math.round(base * 0.07 * 100) / 100;
-  return { base, clientFee, carrierFee, clientTotal: base + clientFee, carrierNet: base - carrierFee };
 }
 
 // ── Exports ───────────────────────────────────────────────────────────────────
