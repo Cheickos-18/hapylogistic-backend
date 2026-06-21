@@ -8,17 +8,17 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_demo', {
 
 // ── Calcul des frais ──────────────────────────────────────────
 // Structure :
-//   clientFee  = base × 9.5% + 0.25€  (frais de service + compensation frais carte Stripe ~1.5%+0.25€)
-//   carrierFee = base × 7%             (commission HapyLogistic sur le transporteur, inchangée)
-//   clientTotal = base + clientFee     (payé par le client)
-//   carrierNet  = base − carrierFee    (reçu net par le transporteur, jamais affecté par Stripe)
+//   clientFee  = base × 8% + 0.25€   (frais de service + compensation frais carte Stripe ~1.5%+0.25€)
+//   carrierFee = base × 9%            (commission HapyLogistic sur le transporteur)
+//   clientTotal = base + clientFee    (payé par le client)
+//   carrierNet  = base − carrierFee   (reçu net par le transporteur, jamais affecté par Stripe)
 //   platformFee = clientFee + carrierFee (commission HapyLogistic visée, avant frais Stripe)
 //
-// Le montant fixe de 0.25€ protège la marge sur les petites transactions,
-// où les frais Stripe (1.5% + 0.25€ fixe) pèsent proportionnellement plus lourd.
+// Net réel HapyLogistic après frais Stripe ≈ 15% de la base, stable sur tous les montants.
+// Le montant fixe de 0.25€ protège la marge sur les petites transactions.
 function calculateFees(baseAmount) {
-  const clientFee    = Math.round((baseAmount * 0.095 + 0.25) * 100) / 100;
-  const carrierFee   = Math.round(baseAmount * 0.07 * 100) / 100;
+  const clientFee    = Math.round((baseAmount * 0.08 + 0.25) * 100) / 100;
+  const carrierFee   = Math.round(baseAmount * 0.09 * 100) / 100;
   const clientTotal  = baseAmount + clientFee;
   const carrierNet   = baseAmount - carrierFee;
   const platformFee  = clientFee + carrierFee;
