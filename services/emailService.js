@@ -162,7 +162,7 @@ async function sendBookingConfirmation({ to, firstName, booking, listing, pickup
             <div class="info-value">${formatCurrency(base)}</div>
           </div>
           <div class="info-item">
-            <div class="info-label">Frais de service (8%)</div>
+            <div class="info-label">Frais de service</div>
             <div class="info-value">${formatCurrency(clientFee)}</div>
           </div>
           <div class="info-item" style="grid-column:1/-1;background:#6c63ff08;border:1px solid #6c63ff20">
