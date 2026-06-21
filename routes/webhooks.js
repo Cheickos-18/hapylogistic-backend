@@ -5,6 +5,50 @@ const { stripe } = require('../services/stripe');
 const db = require('../config/database');
 const email = require('../services/emailService');
 
+// ── Calcule et stocke le net réel HapyLogistic après frais Stripe ──
+// (commission visée − frais de traitement Stripe réels)
+// Ne peut être calculé qu'au moment de la capture, car c'est seulement
+// à cet instant que Stripe génère le balance_transaction avec les frais réels.
+async function recordStripeFeesForBooking(paymentIntentId) {
+  try {
+    const pi = await stripe.paymentIntents.retrieve(paymentIntentId, {
+      expand: ['latest_charge.balance_transaction'],
+    });
+
+    const charge = pi.latest_charge;
+    if (!charge || !charge.balance_transaction) {
+      console.warn(`[Fees] Pas de balance_transaction disponible pour ${paymentIntentId}`);
+      return;
+    }
+
+    // balance_transaction.fee = frais Stripe réels en centimes
+    const stripeFee = charge.balance_transaction.fee / 100;
+
+    const [rows] = await db.execute(
+      'SELECT platform_fee FROM bookings WHERE payment_intent_id = ?',
+      [paymentIntentId]
+    );
+    if (!rows.length) {
+      console.warn(`[Fees] Aucune réservation trouvée pour ${paymentIntentId}`);
+      return;
+    }
+
+    const platformFee        = parseFloat(rows[0].platform_fee);
+    const netAfterStripeFees = Math.round((platformFee - stripeFee) * 100) / 100;
+
+    await db.execute(
+      `UPDATE bookings
+       SET stripe_processing_fee = ?, net_after_stripe_fees = ?
+       WHERE payment_intent_id = ?`,
+      [stripeFee, netAfterStripeFees, paymentIntentId]
+    );
+
+    console.log(`💶 [Fees] ${paymentIntentId} — commission visée: ${platformFee}€, frais Stripe: ${stripeFee}€, net réel: ${netAfterStripeFees}€`);
+  } catch (err) {
+    console.error('[Fees] Erreur calcul frais Stripe:', err.message);
+  }
+}
+
 router.post('/stripe', async (req, res) => {
   const sig    = req.headers['stripe-signature'];
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -90,6 +134,11 @@ router.post('/stripe', async (req, res) => {
           [pi.id]
         );
         console.log(`✅ Booking passé à 'completed' via webhook: ${pi.id}`);
+
+        // ── Calcul du net réel HapyLogistic après frais Stripe ──
+        // (commission visée − frais de traitement Stripe), stocké en BDD
+        await recordStripeFeesForBooking(pi.id);
+
         break;
       }
 
