@@ -371,7 +371,27 @@ router.get('/me', require('../middleware/auth'), async (req, res) => {
       [req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Utilisateur introuvable' });
-    const u = rows[0];
+    let u = rows[0];
+
+    // ── Auto-sync KYC : si pending_kyc mais Stripe dit charges_enabled → activer ──
+    // Couvre le cas où Stripe active le compte sans envoyer le webhook account.updated
+    if (u.role === 'carrier' && u.status === 'pending_kyc' && u.stripe_account_id) {
+      try {
+        const stripeAccount = await stripe.accounts.retrieve(u.stripe_account_id);
+        if (stripeAccount.details_submitted && stripeAccount.charges_enabled) {
+          await db.execute(
+            "UPDATE users SET status = 'active' WHERE id = ?",
+            [u.id]
+          );
+          u.status = 'active';
+          console.log(`✅ [AutoSync] KYC activé automatiquement pour ${u.id} (${u.stripe_account_id})`);
+        }
+      } catch (stripeErr) {
+        // Non bloquant — on retourne quand même les infos utilisateur
+        console.warn('[AutoSync] Impossible de vérifier le statut Stripe:', stripeErr.message);
+      }
+    }
+
     res.json({
       id: u.id, firstName: u.first_name, lastName: u.last_name,
       email: u.email, phone: u.phone, role: u.role, country: u.country,
