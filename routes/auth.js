@@ -6,8 +6,20 @@ const jwt      = require('jsonwebtoken');
 const db       = require('../config/database');
 const { stripe } = require('../services/stripe');
 const { Resend } = require('resend');
-
 const resend = new Resend(process.env.RESEND_API_KEY);
+
+// ── Normalisation téléphone → format E.164 (requis par Stripe) ──
+function normalizePhone(phone) {
+  if (!phone) return phone;
+  let p = String(phone).trim().replace(/[\s\-\.\(\)]/g, '');
+  // 0XXXXXXXXX → +33XXXXXXXXX (France)
+  if (/^0[1-9]\d{8}$/.test(p)) return '+33' + p.slice(1);
+  // 33XXXXXXXXX → +33XXXXXXXXX
+  if (/^33[1-9]\d{8}$/.test(p)) return '+' + p;
+  // Déjà au format +XX... → ok
+  if (p.startsWith('+')) return p;
+  return p;
+}
 
 // ── Templates email ──────────────────────────────────────────
 function emailWelcomeClient(firstName) {
@@ -27,7 +39,6 @@ function emailWelcomeClient(firstName) {
     <div style="padding:40px 32px">
       <h1 style="margin:0 0 12px;font-size:24px;color:#1a1a2e">Bonjour ${firstName} 👋</h1>
       <p style="color:#555;line-height:1.7;margin:0 0 24px">Bienvenue sur HapyLogistic ! Votre compte client est maintenant actif. Vous pouvez dès maintenant envoyer vos colis partout dans le monde via nos transporteurs communautaires vérifiés.</p>
-
       <!-- Comment ça marche -->
       <div style="background:#f8f9ff;border-radius:12px;padding:24px;margin-bottom:24px">
         <div style="font-weight:700;color:#1a1a2e;margin-bottom:16px;font-size:16px">📦 Comment envoyer un colis ?</div>
@@ -46,7 +57,6 @@ function emailWelcomeClient(firstName) {
           </div>
         </div>
       </div>
-
       <!-- Paiements & Remboursements -->
       <div style="border:2px solid #e8f4fd;border-radius:12px;padding:24px;margin-bottom:24px">
         <div style="font-weight:700;color:#1a1a2e;margin-bottom:16px;font-size:16px">💳 Paiements & Remboursements</div>
@@ -77,7 +87,6 @@ function emailWelcomeClient(firstName) {
           </tr>
         </table>
       </div>
-
       <!-- CTA -->
       <div style="text-align:center;margin-top:32px">
         <a href="${process.env.FRONTEND_URL}/pages/listings.html" style="display:inline-block;background:linear-gradient(135deg,#1a1aff,#4f46e5);color:#fff;text-decoration:none;padding:14px 36px;border-radius:50px;font-weight:700;font-size:16px">
@@ -95,7 +104,6 @@ function emailWelcomeClient(firstName) {
 </html>`
   };
 }
-
 function emailWelcomeCarrier(firstName) {
   return {
     subject: '✈️ Bienvenue transporteur HapyLogistic !',
@@ -113,7 +121,6 @@ function emailWelcomeCarrier(firstName) {
     <div style="padding:40px 32px">
       <h1 style="margin:0 0 12px;font-size:24px;color:#1a1a2e">Bienvenue ${firstName} ✈️</h1>
       <p style="color:#555;line-height:1.7;margin:0 0 24px">Félicitations, votre compte transporteur est créé ! Vous pouvez maintenant rentabiliser vos voyages en transportant des colis pour d'autres membres de la communauté.</p>
-
       <!-- Étapes pour commencer -->
       <div style="background:#f8f9ff;border-radius:12px;padding:24px;margin-bottom:24px">
         <div style="font-weight:700;color:#1a1a2e;margin-bottom:16px;font-size:16px">🚀 Pour commencer à gagner</div>
@@ -136,14 +143,13 @@ function emailWelcomeCarrier(firstName) {
           </div>
         </div>
       </div>
-
       <!-- Commission & Paiements -->
       <div style="border:2px solid #d1fae5;border-radius:12px;padding:24px;margin-bottom:24px">
         <div style="font-weight:700;color:#1a1a2e;margin-bottom:16px;font-size:16px">💰 Commission & Paiements</div>
         <table style="width:100%;border-collapse:collapse">
           <tr>
             <td style="padding:8px 0;border-bottom:1px solid #f0f0f0">
-              <span style="color:#059669;font-weight:600">✅ Commission fixe : 7%</span><br>
+              <span style="color:#059669;font-weight:600">✅ Commission fixe : 9%</span><br>
               <span style="color:#666;font-size:13px">Prélevée automatiquement sur chaque transaction. Pas d'abonnement, pas de frais cachés.</span>
             </td>
           </tr>
@@ -167,7 +173,6 @@ function emailWelcomeCarrier(firstName) {
           </tr>
         </table>
       </div>
-
       <!-- Niveaux -->
       <div style="background:#fffbeb;border:2px solid #fcd34d;border-radius:12px;padding:20px;margin-bottom:24px">
         <div style="font-weight:700;color:#1a1a2e;margin-bottom:12px">🏆 Système de niveaux</div>
@@ -178,7 +183,6 @@ function emailWelcomeCarrier(firstName) {
           <span style="color:#888;font-size:12px;margin-top:4px;display:block">Les niveaux supérieurs augmentent votre visibilité dans les recherches.</span>
         </div>
       </div>
-
       <!-- CTA -->
       <div style="text-align:center;margin-top:32px">
         <a href="${process.env.FRONTEND_URL}/pages/dashboard-carrier.html" style="display:inline-block;background:linear-gradient(135deg,#059669,#10b981);color:#fff;text-decoration:none;padding:14px 36px;border-radius:50px;font-weight:700;font-size:16px">
@@ -207,7 +211,9 @@ function generateToken(user) {
 
 // ── POST /api/auth/register ──────────────────
 router.post('/register', async (req, res) => {
-  const { firstName, lastName, email, password, phone, role, country, carrierType, destination, carrierAccountType, companyName } = req.body;
+  const { firstName, lastName, email, password, role, country, carrierType, destination, carrierAccountType, companyName } = req.body;
+  // Normaliser le téléphone en E.164 dès la réception
+  const phone = normalizePhone(req.body.phone);
 
   if (!firstName || !lastName || !email || !password || !role) {
     return res.status(400).json({ error: 'Champs obligatoires manquants' });
@@ -215,21 +221,17 @@ router.post('/register', async (req, res) => {
   if (!['client', 'carrier'].includes(role)) {
     return res.status(400).json({ error: 'Rôle invalide' });
   }
-
   try {
     // Vérifier email unique
     const [existing] = await db.execute('SELECT id FROM users WHERE email = ?', [email]);
     if (existing.length > 0) {
       return res.status(409).json({ error: 'Un compte avec cet email existe déjà' });
     }
-
     const passwordHash = await bcrypt.hash(password, 10);
-
     // Créer compte Stripe
     let stripeCustomerId = null;
     let stripeAccountId  = null;
     let onboardingUrl    = null;
-
     try {
       if (role === 'client') {
         const customer = await stripe.customers.create({
@@ -238,28 +240,23 @@ router.post('/register', async (req, res) => {
         });
         stripeCustomerId = customer.id;
       } else {
-        // ── Type de compte : particulier (individual) ou entreprise (company) ──
         const accountType = ['individual', 'company'].includes(carrierAccountType)
           ? carrierAccountType
           : 'individual';
-
         const stripeAccountParams = {
           type: 'express', country: 'FR', email,
           capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
           business_type: accountType,
           metadata: { role, carrierType: carrierType || 'air', accountType }
         };
-
         if (accountType === 'individual') {
           stripeAccountParams.individual = { first_name: firstName, last_name: lastName, email, phone };
         } else {
           stripeAccountParams.company    = { name: companyName || `${firstName} ${lastName}` };
           stripeAccountParams.individual = { first_name: firstName, last_name: lastName, email, phone };
         }
-
         const account = await stripe.accounts.create(stripeAccountParams);
         stripeAccountId = account.id;
-
         const accountLink = await stripe.accountLinks.create({
           account: account.id,
           refresh_url: `${process.env.FRONTEND_URL}/pages/register.html`,
@@ -269,20 +266,19 @@ router.post('/register', async (req, res) => {
         onboardingUrl = accountLink.url;
       }
     } catch (stripeErr) {
-      // ── MODIF 1 : bloquer l'inscription si Stripe échoue pour un transporteur ──
-      // Sans stripe_account_id, le transporteur ne pourra jamais recevoir de paiements.
-      // On retourne une erreur claire plutôt que de créer un compte inutilisable.
       if (role === 'carrier') {
         console.error('Stripe account creation failed for carrier:', stripeErr.message);
-        return res.status(502).json({
-          error: 'Impossible de créer votre compte de paiement Stripe. Vérifiez votre connexion et réessayez.',
-          stripeError: true,
-        });
+        // Retourner un message lisible selon le type d'erreur Stripe
+        let userMessage = 'Impossible de créer votre compte de paiement Stripe. Vérifiez votre connexion et réessayez.';
+        if (stripeErr.message && stripeErr.message.includes('not a valid phone number')) {
+          userMessage = 'Numéro de téléphone invalide. Utilisez le format international (+33 7 XX XX XX XX).';
+        } else if (stripeErr.message && stripeErr.message.includes('email')) {
+          userMessage = 'Adresse email invalide ou déjà utilisée sur Stripe.';
+        }
+        return res.status(502).json({ error: userMessage, stripeError: true });
       }
-      // Pour les clients, Stripe Customer est optionnel — on continue sans.
       console.warn('Stripe customer creation failed (non-blocking):', stripeErr.message);
     }
-
     // Insérer en base
     const userId = require('crypto').randomUUID();
     await db.execute(`
@@ -297,17 +293,14 @@ router.post('/register', async (req, res) => {
       stripeCustomerId, stripeAccountId,
       role === 'carrier' ? 'pending_kyc' : 'active'
     ]);
-
     const [rows] = await db.execute('SELECT * FROM users WHERE id = ?', [userId]);
     const user = rows[0];
     const token = generateToken(user);
-
-    // ── Envoi email de bienvenue ──────────────
+    // Envoi email de bienvenue
     try {
       const template = role === 'client'
         ? emailWelcomeClient(firstName)
         : emailWelcomeCarrier(firstName);
-
       await resend.emails.send({
         from: 'HapyLogistic <contact@hapylogistic.com>',
         to:   email,
@@ -317,7 +310,6 @@ router.post('/register', async (req, res) => {
     } catch (emailErr) {
       console.warn('Email bienvenue non envoyé:', emailErr.message);
     }
-
     res.status(201).json({
       success: true,
       token,
@@ -331,7 +323,6 @@ router.post('/register', async (req, res) => {
         ? 'Compte client créé avec succès'
         : 'Compte transporteur créé. Complétez votre KYC via le lien fourni.'
     });
-
   } catch (err) {
     console.error('Erreur register:', err.message);
     res.status(500).json({ error: 'Erreur lors de la création du compte' });
@@ -344,19 +335,16 @@ router.post('/login', async (req, res) => {
   if (!email || !password) {
     return res.status(400).json({ error: 'Email et mot de passe requis' });
   }
-
   try {
     const [rows] = await db.execute('SELECT * FROM users WHERE email = ?', [email]);
     if (!rows.length) {
       return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
     }
-
     const user = rows[0];
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) {
       return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
     }
-
     const token = generateToken(user);
     res.json({
       success: true,
@@ -369,7 +357,6 @@ router.post('/login', async (req, res) => {
         country: user.country,
       }
     });
-
   } catch (err) {
     console.error('Erreur login:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });
@@ -377,8 +364,6 @@ router.post('/login', async (req, res) => {
 });
 
 // ── GET /api/auth/me ─────────────────────────
-// MODIF 2 : ajout de stripe_account_id dans le SELECT
-//           + hasStripeAccount dans la réponse
 router.get('/me', require('../middleware/auth'), async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -400,9 +385,6 @@ router.get('/me', require('../middleware/auth'), async (req, res) => {
 });
 
 // ── POST /api/auth/onboarding-link ───────────
-// Régénère un lien d'onboarding Stripe Connect pour un transporteur
-// dont la vérification KYC est en attente (lien initial expiré ou
-// abandonné avant la fin du process Stripe).
 router.post('/onboarding-link', require('../middleware/auth'), async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -411,21 +393,18 @@ router.post('/onboarding-link', require('../middleware/auth'), async (req, res) 
     );
     if (!rows.length) return res.status(404).json({ error: 'Utilisateur introuvable' });
     const u = rows[0];
-
     if (u.role !== 'carrier') {
       return res.status(403).json({ error: 'Réservé aux transporteurs' });
     }
     if (!u.stripe_account_id) {
       return res.status(400).json({ error: 'Aucun compte Stripe associé à ce profil' });
     }
-
     const accountLink = await stripe.accountLinks.create({
       account: u.stripe_account_id,
       refresh_url: `${process.env.FRONTEND_URL}/pages/dashboard-carrier.html`,
       return_url:  `${process.env.FRONTEND_URL}/pages/dashboard-carrier.html`,
       type: 'account_onboarding'
     });
-
     res.json({ url: accountLink.url });
   } catch (err) {
     console.error('Erreur onboarding-link:', err.message);
@@ -434,11 +413,6 @@ router.post('/onboarding-link', require('../middleware/auth'), async (req, res) 
 });
 
 // ── POST /api/auth/create-stripe-account ─────
-// MODIF 3 : nouvel endpoint
-// Crée le compte Stripe Connect manquant puis génère un lien KYC.
-// Cas : transporteur inscrit avant que Stripe soit opérationnel,
-// ou dont la création Stripe a échoué silencieusement à l'inscription.
-// Si le compte existe déjà, génère simplement un nouveau lien KYC.
 router.post('/create-stripe-account', require('../middleware/auth'), async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -447,11 +421,9 @@ router.post('/create-stripe-account', require('../middleware/auth'), async (req,
     );
     if (!rows.length) return res.status(404).json({ error: 'Utilisateur introuvable' });
     const u = rows[0];
-
     if (u.role !== 'carrier') {
       return res.status(403).json({ error: 'Réservé aux transporteurs' });
     }
-
     // Si le compte Stripe existe déjà, générer juste un nouveau lien KYC
     if (u.stripe_account_id) {
       const accountLink = await stripe.accountLinks.create({
@@ -462,8 +434,8 @@ router.post('/create-stripe-account', require('../middleware/auth'), async (req,
       });
       return res.json({ url: accountLink.url });
     }
-
-    // Créer le compte Stripe Connect Express
+    // Normaliser le téléphone stocké en base
+    const phone = normalizePhone(u.phone);
     const account = await stripe.accounts.create({
       type: 'express',
       country: 'FR',
@@ -474,36 +446,28 @@ router.post('/create-stripe-account', require('../middleware/auth'), async (req,
         first_name: u.first_name,
         last_name:  u.last_name,
         email:      u.email,
-        phone:      u.phone,
+        phone:      phone,
       },
       metadata: { userId: req.user.id, role: 'carrier' }
     });
-
-    // Sauvegarder le stripe_account_id en base
     await db.execute(
       'UPDATE users SET stripe_account_id = ? WHERE id = ?',
       [account.id, req.user.id]
     );
-
-    // Générer le lien KYC
     const accountLink = await stripe.accountLinks.create({
       account: account.id,
       refresh_url: `${process.env.FRONTEND_URL}/pages/dashboard-carrier.html`,
       return_url:  `${process.env.FRONTEND_URL}/pages/dashboard-carrier.html`,
       type: 'account_onboarding'
     });
-
     res.json({ url: accountLink.url });
   } catch (err) {
     console.error('Erreur create-stripe-account:', err.message);
-
-    // ── Traduire les erreurs Stripe en messages lisibles ──────────
     let userMessage = 'Une erreur est survenue. Réessayez dans quelques instants.';
-
     if (err.message && err.message.includes('signed up for Connect')) {
       userMessage = 'La plateforme de paiement n\'est pas encore configurée. Contactez le support : contact@hapylogistic.com';
     } else if (err.message && err.message.includes('not a valid phone number')) {
-      userMessage = 'Votre numéro de téléphone est invalide. Mettez-le à jour dans votre profil au format international (+33...).';
+      userMessage = 'Numéro de téléphone invalide. Mettez-le à jour dans votre profil au format international (+33 7 XX XX XX XX).';
     } else if (err.message && err.message.includes('email')) {
       userMessage = 'Votre adresse email est invalide ou déjà utilisée sur Stripe.';
     } else if (err.type === 'StripeConnectionError') {
@@ -511,7 +475,6 @@ router.post('/create-stripe-account', require('../middleware/auth'), async (req,
     } else if (err.type === 'StripeAuthenticationError') {
       userMessage = 'Erreur de configuration Stripe. Contactez le support : contact@hapylogistic.com';
     }
-
     res.status(500).json({ error: userMessage });
   }
 });
