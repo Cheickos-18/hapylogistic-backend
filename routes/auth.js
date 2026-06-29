@@ -392,12 +392,22 @@ router.get('/me', require('../middleware/auth'), async (req, res) => {
       }
     }
 
+    // Récupérer details_submitted depuis Stripe si pending_kyc (après auto-sync)
+    let stripeDetailsSubmitted = false;
+    if (u.role === 'carrier' && u.status === 'pending_kyc' && u.stripe_account_id) {
+      try {
+        const acct = await stripe.accounts.retrieve(u.stripe_account_id);
+        stripeDetailsSubmitted = !!acct.details_submitted;
+      } catch(e) { /* non bloquant */ }
+    }
+
     res.json({
       id: u.id, firstName: u.first_name, lastName: u.last_name,
       email: u.email, phone: u.phone, role: u.role, country: u.country,
       status: u.status, level: u.carrier_level, carrierType: u.carrier_type,
       totalTrips: u.total_trips, rating: parseFloat(u.average_rating) || 0,
       hasStripeAccount: !!u.stripe_account_id,
+      stripeDetailsSubmitted,
     });
   } catch (err) {
     res.status(500).json({ error: 'Erreur serveur' });
