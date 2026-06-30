@@ -126,8 +126,11 @@ router.post('/intent', auth, async (req, res) => {
     const pickupCode = generatePickupCode();
     const bookingId  = require('crypto').randomUUID();
 
-    // Plafond d'indemnisation applicable à cette réservation, calculé une fois pour toutes
-    // (conforme CGU §6 : 20€/kg par défaut si aucune preuve valide n'a été fournie)
+    // Valeur indicative conservée pour l'examen des litiges (preuve de bonne foi),
+    // mais NE détermine PAS le montant remboursable : HapyLogistic rembourse
+    // uniquement le prix du transport payé (client_total), jamais le contenu du
+    // colis — voir CGU §6 et §8. Ce champ aide simplement à distinguer une
+    // réclamation crédible (valeur déclarée + preuve) d'une réclamation suspecte.
     const compensationCap = valueProofUrl ? declaredValueNum : defaultCompensationCap(weightKg);
 
     await db.execute(`
@@ -368,10 +371,11 @@ router.post('/capture/:id', auth, async (req, res) => {
 });
 
 // ── POST /api/payments/refund/:id ────────────────────────────
-// Conformité CGU §6 : le montant remboursable est plafonné par compensation_cap,
-// calculé à la réservation (valeur déclarée si preuve fournie, sinon 20€/kg par défaut).
-// Le champ `amount` du corps de la requête n'est plus une source de confiance directe :
-// il sert d'indication mais ne peut jamais dépasser le plafond enregistré sur la réservation.
+// IMPORTANT : HapyLogistic rembourse uniquement le prix du transport payé par le
+// client (client_total), jamais la valeur du contenu du colis. La plateforme n'est
+// pas un assureur de marchandises — voir CGU §6 et §8. declared_value / compensation_cap
+// servent uniquement de preuve de bonne foi lors de l'examen du litige, pas de base
+// de calcul du remboursement.
 router.post('/refund/:id', auth, async (req, res) => {
   const { reason, amount } = req.body;
   try {
@@ -385,12 +389,7 @@ router.post('/refund/:id', auth, async (req, res) => {
 
     const pi = await stripe.paymentIntents.retrieve(booking.payment_intent_id);
 
-    // ── Plafonnement anti-fraude (conforme CGU §6) ──
-    // Le remboursement ne peut jamais dépasser : (1) le montant réellement débité au
-    // client (clientTotal), et (2) le plafond d'indemnisation calculé à la réservation.
-    const compensationCap = booking.compensation_cap !== null && booking.compensation_cap !== undefined
-      ? parseFloat(booking.compensation_cap)
-      : defaultCompensationCap(booking.weight_kg);
+    // ── Plafond strict : jamais plus que le prix du transport réellement débité ──
     const clientTotal = parseFloat(booking.client_total);
     let refundAmount = clientTotal;
     if (amount !== undefined && amount !== null) {
@@ -398,14 +397,12 @@ router.post('/refund/:id', auth, async (req, res) => {
       if (isNaN(requested) || requested < 0) {
         return res.status(400).json({ error: 'Montant de remboursement invalide' });
       }
-      refundAmount = Math.min(requested, clientTotal, compensationCap);
-    } else {
-      refundAmount = Math.min(clientTotal, compensationCap);
+      refundAmount = Math.min(requested, clientTotal);
     }
 
     if (pi.status === 'requires_capture') {
       // Le paiement n'a pas encore été capturé : annulation simple, le client n'a pas
-      // été débité au-delà de l'autorisation, donc le plafond ne s'applique pas ici.
+      // été débité au-delà de l'autorisation.
       await stripe.paymentIntents.cancel(booking.payment_intent_id);
     } else if (pi.status === 'succeeded') {
       const refundParams = {
