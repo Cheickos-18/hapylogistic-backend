@@ -6,17 +6,58 @@ const auth    = require('../middleware/auth');
 const { stripe, calculateFees } = require('../services/stripe');
 const email   = require('../services/emailService');
 
+// ── Conformité CGU §6 : seuil de preuve obligatoire et plafond forfaitaire ──
+// Au-delà de ce montant déclaré, une preuve de valeur est exigée à la réservation.
+const VALUE_PROOF_THRESHOLD_EUR = 50;
+// En l'absence de preuve valide, l'indemnisation est plafonnée à ce montant par kg.
+const DEFAULT_COMPENSATION_PER_KG_EUR = 20;
+// Taille max acceptée pour le fichier de preuve encodé en base64 (5 Mo).
+const MAX_VALUE_PROOF_BYTES = 5 * 1024 * 1024;
+
 // ── Générer un code de collecte à 4 chiffres ─────────────────
 function generatePickupCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
 }
 
+// ── Calcule le plafond d'indemnisation par défaut pour une réservation ──
+// (utilisé quand aucune preuve de valeur valide n'a été fournie à la réservation)
+function defaultCompensationCap(weightKg) {
+  return Math.round(parseFloat(weightKg) * DEFAULT_COMPENSATION_PER_KG_EUR * 100) / 100;
+}
+
 // ── POST /api/payments/intent ────────────────
 router.post('/intent', auth, async (req, res) => {
-  const { listingId, weightKg, parcelType, recipientName, recipientPhone, instructions, notes } = req.body;
+  const {
+    listingId, weightKg, parcelType, recipientName, recipientPhone, instructions, notes,
+    declaredValue, valueProof,
+  } = req.body;
   const specialNotes = instructions || notes || null;
 
   if (!listingId || !weightKg) return res.status(400).json({ error: 'listingId et weightKg requis' });
+
+  // ── Validation de la déclaration de valeur (conforme CGU §6) ──
+  const declaredValueNum = declaredValue !== undefined && declaredValue !== null
+    ? parseFloat(declaredValue) : 0;
+  if (declaredValue !== undefined && (isNaN(declaredValueNum) || declaredValueNum < 0)) {
+    return res.status(400).json({ error: 'Valeur déclarée invalide' });
+  }
+
+  let valueProofUrl = null;
+  if (declaredValueNum > VALUE_PROOF_THRESHOLD_EUR) {
+    if (!valueProof) {
+      return res.status(400).json({
+        error: `Une preuve de valeur (facture, photo datée ou expertise) est requise pour une valeur déclarée supérieure à ${VALUE_PROOF_THRESHOLD_EUR} €.`,
+      });
+    }
+    // Vérification grossière de la taille du base64 reçu (≈ 4/3 de la taille réelle du fichier)
+    const approxBytes = Math.ceil((valueProof.length * 3) / 4);
+    if (approxBytes > MAX_VALUE_PROOF_BYTES) {
+      return res.status(400).json({ error: 'Fichier de preuve trop volumineux (5 Mo max).' });
+    }
+    // TODO: migrer ce stockage vers un service de fichiers (S3, Hostinger object storage, etc.)
+    // plutôt que de conserver le base64 brut en base de données — voir note de déploiement.
+    valueProofUrl = valueProof;
+  }
 
   try {
     const [listings] = await db.execute(`
@@ -45,6 +86,8 @@ router.post('/intent', auth, async (req, res) => {
       metadata: {
         listingId, clientId: req.user.id, carrierId: listing.carrier_id,
         weightKg: String(weightKg), baseAmount: String(base),
+        declaredValue: String(declaredValueNum),
+        hasValueProof: String(!!valueProofUrl),
       },
     };
 
@@ -83,13 +126,18 @@ router.post('/intent', auth, async (req, res) => {
     const pickupCode = generatePickupCode();
     const bookingId  = require('crypto').randomUUID();
 
+    // Plafond d'indemnisation applicable à cette réservation, calculé une fois pour toutes
+    // (conforme CGU §6 : 20€/kg par défaut si aucune preuve valide n'a été fournie)
+    const compensationCap = valueProofUrl ? declaredValueNum : defaultCompensationCap(weightKg);
+
     await db.execute(`
       INSERT INTO bookings
         (id, listing_id, client_id, carrier_id, weight_kg, parcel_type,
          recipient_name, recipient_phone, special_notes,
          base_amount, client_fee, carrier_fee, client_total, carrier_net, platform_fee,
+         declared_value, value_proof_url, compensation_cap,
          payment_intent_id, pickup_code, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_payment')
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_payment')
     `, [
       bookingId, listingId, req.user.id, listing.carrier_id,
       parseFloat(weightKg), parcelType || null,
@@ -97,6 +145,7 @@ router.post('/intent', auth, async (req, res) => {
       base,
       amounts.clientFee  / 100, amounts.carrierFee / 100,
       amounts.clientTotal/ 100, amounts.carrierNet / 100, amounts.platformFee / 100,
+      declaredValueNum, valueProofUrl, compensationCap,
       pi.id, pickupCode,
     ]);
 
@@ -118,7 +167,9 @@ router.post('/intent', auth, async (req, res) => {
         clientFee:   (amounts.clientFee   / 100).toFixed(2),
         total:       (amounts.clientTotal / 100).toFixed(2),
         carrierGets: (amounts.carrierNet  / 100).toFixed(2),
-      }
+      },
+      declaredValue:   declaredValueNum,
+      compensationCap,
     });
 
   } catch (err) {
@@ -253,7 +304,10 @@ router.post('/confirm-receipt/:id', auth, async (req, res) => {
     }
 
     // Capture simple — transfer_data[amount] défini à la création gère automatiquement
-    // le split : carrierNet part à Bay, le reste reste sur la plateforme
+    // le split : carrierNet part à Bay, le reste reste sur la plateforme.
+    // NB: la capture déclenche le transfert Stripe Connect, mais le virement réel vers
+    // la banque du transporteur suit le délai standard Stripe (généralement 3 à 7 jours),
+    // pas un versement immédiat — voir CGU §5 et page Tarifs.
     await stripe.paymentIntents.capture(booking.payment_intent_id);
 
     await db.execute(
@@ -282,7 +336,7 @@ router.post('/confirm-receipt/:id', auth, async (req, res) => {
       console.error('[EMAIL] sendReceiptConfirmed failed:', emailErr.message);
     }
 
-    res.json({ success: true, message: 'Réception confirmée — transporteur payé immédiatement' });
+    res.json({ success: true, message: 'Réception confirmée — virement au transporteur initié (sous 3 à 7 jours)' });
   } catch (err) {
     console.error('Erreur confirm-receipt:', err.message);
     res.status(500).json({ error: 'Erreur lors de la confirmation: ' + err.message });
@@ -306,7 +360,7 @@ router.post('/capture/:id', auth, async (req, res) => {
       'UPDATE users SET total_trips = total_trips + 1 WHERE id = ?',
       [booking.carrier_id]
     );
-    res.json({ success: true, message: 'Paiement capturé — transporteur payé' });
+    res.json({ success: true, message: 'Paiement capturé — virement au transporteur initié (sous 3 à 7 jours)' });
   } catch (err) {
     console.error('Erreur capture:', err.message);
     res.status(500).json({ error: 'Erreur lors de la capture' });
@@ -314,6 +368,10 @@ router.post('/capture/:id', auth, async (req, res) => {
 });
 
 // ── POST /api/payments/refund/:id ────────────────────────────
+// Conformité CGU §6 : le montant remboursable est plafonné par compensation_cap,
+// calculé à la réservation (valeur déclarée si preuve fournie, sinon 20€/kg par défaut).
+// Le champ `amount` du corps de la requête n'est plus une source de confiance directe :
+// il sert d'indication mais ne peut jamais dépasser le plafond enregistré sur la réservation.
 router.post('/refund/:id', auth, async (req, res) => {
   const { reason, amount } = req.body;
   try {
@@ -327,11 +385,34 @@ router.post('/refund/:id', auth, async (req, res) => {
 
     const pi = await stripe.paymentIntents.retrieve(booking.payment_intent_id);
 
+    // ── Plafonnement anti-fraude (conforme CGU §6) ──
+    // Le remboursement ne peut jamais dépasser : (1) le montant réellement débité au
+    // client (clientTotal), et (2) le plafond d'indemnisation calculé à la réservation.
+    const compensationCap = booking.compensation_cap !== null && booking.compensation_cap !== undefined
+      ? parseFloat(booking.compensation_cap)
+      : defaultCompensationCap(booking.weight_kg);
+    const clientTotal = parseFloat(booking.client_total);
+    let refundAmount = clientTotal;
+    if (amount !== undefined && amount !== null) {
+      const requested = parseFloat(amount);
+      if (isNaN(requested) || requested < 0) {
+        return res.status(400).json({ error: 'Montant de remboursement invalide' });
+      }
+      refundAmount = Math.min(requested, clientTotal, compensationCap);
+    } else {
+      refundAmount = Math.min(clientTotal, compensationCap);
+    }
+
     if (pi.status === 'requires_capture') {
+      // Le paiement n'a pas encore été capturé : annulation simple, le client n'a pas
+      // été débité au-delà de l'autorisation, donc le plafond ne s'applique pas ici.
       await stripe.paymentIntents.cancel(booking.payment_intent_id);
     } else if (pi.status === 'succeeded') {
-      const refundParams = { payment_intent: booking.payment_intent_id, reason: reason || 'requested_by_customer' };
-      if (amount) refundParams.amount = Math.round(parseFloat(amount) * 100);
+      const refundParams = {
+        payment_intent: booking.payment_intent_id,
+        reason: reason || 'requested_by_customer',
+        amount: Math.round(refundAmount * 100),
+      };
       await stripe.refunds.create(refundParams);
     } else {
       return res.status(400).json({ error: `Impossible d'annuler un paiement en statut: ${pi.status}` });
@@ -352,7 +433,7 @@ router.post('/refund/:id', auth, async (req, res) => {
           firstName:    clientRows[0].first_name,
           booking,
           listing:      listings[0],
-          refundAmount: parseFloat(booking.client_total),
+          refundAmount,
           reason:       reason || 'Annulation de la réservation',
         });
       }
@@ -360,7 +441,7 @@ router.post('/refund/:id', auth, async (req, res) => {
       console.error('[EMAIL] sendRefundNotification failed:', emailErr.message);
     }
 
-    res.json({ success: true, message: 'Réservation annulée — remboursement en cours' });
+    res.json({ success: true, message: 'Réservation annulée — remboursement en cours', refundAmount });
   } catch (err) {
     console.error('Erreur refund:', err.message);
     res.status(500).json({ error: 'Erreur lors du remboursement: ' + err.message });
