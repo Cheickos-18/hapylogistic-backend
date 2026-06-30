@@ -6,57 +6,32 @@ const auth    = require('../middleware/auth');
 const { stripe, calculateFees } = require('../services/stripe');
 const email   = require('../services/emailService');
 
-// ── Conformité CGU §6 : seuil de preuve obligatoire et plafond forfaitaire ──
-// Au-delà de ce montant déclaré, une preuve de valeur est exigée à la réservation.
-const VALUE_PROOF_THRESHOLD_EUR = 50;
-// En l'absence de preuve valide, l'indemnisation est plafonnée à ce montant par kg.
-const DEFAULT_COMPENSATION_PER_KG_EUR = 20;
-// Taille max acceptée pour le fichier de preuve encodé en base64 (5 Mo).
-const MAX_VALUE_PROOF_BYTES = 5 * 1024 * 1024;
+// ── Déclaration de valeur (champ informatif, conforme CGU §6) ──
+// La valeur déclarée par le client aide à documenter le dossier en cas de litige,
+// mais HapyLogistic n'indemnise jamais le contenu du colis : seul le prix du
+// transport payé (client_total) peut être remboursé — voir CGU §6 et §8.
+// Aucune preuve n'est exigée à la réservation.
 
 // ── Générer un code de collecte à 4 chiffres ─────────────────
 function generatePickupCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
 }
 
-// ── Calcule le plafond d'indemnisation par défaut pour une réservation ──
-// (utilisé quand aucune preuve de valeur valide n'a été fournie à la réservation)
-function defaultCompensationCap(weightKg) {
-  return Math.round(parseFloat(weightKg) * DEFAULT_COMPENSATION_PER_KG_EUR * 100) / 100;
-}
-
 // ── POST /api/payments/intent ────────────────
 router.post('/intent', auth, async (req, res) => {
   const {
     listingId, weightKg, parcelType, recipientName, recipientPhone, instructions, notes,
-    declaredValue, valueProof,
+    declaredValue,
   } = req.body;
   const specialNotes = instructions || notes || null;
 
   if (!listingId || !weightKg) return res.status(400).json({ error: 'listingId et weightKg requis' });
 
-  // ── Validation de la déclaration de valeur (conforme CGU §6) ──
+  // ── Validation simple de la déclaration de valeur (champ informatif uniquement) ──
   const declaredValueNum = declaredValue !== undefined && declaredValue !== null
     ? parseFloat(declaredValue) : 0;
   if (declaredValue !== undefined && (isNaN(declaredValueNum) || declaredValueNum < 0)) {
     return res.status(400).json({ error: 'Valeur déclarée invalide' });
-  }
-
-  let valueProofUrl = null;
-  if (declaredValueNum > VALUE_PROOF_THRESHOLD_EUR) {
-    if (!valueProof) {
-      return res.status(400).json({
-        error: `Une preuve de valeur (facture, photo datée ou expertise) est requise pour une valeur déclarée supérieure à ${VALUE_PROOF_THRESHOLD_EUR} €.`,
-      });
-    }
-    // Vérification grossière de la taille du base64 reçu (≈ 4/3 de la taille réelle du fichier)
-    const approxBytes = Math.ceil((valueProof.length * 3) / 4);
-    if (approxBytes > MAX_VALUE_PROOF_BYTES) {
-      return res.status(400).json({ error: 'Fichier de preuve trop volumineux (5 Mo max).' });
-    }
-    // TODO: migrer ce stockage vers un service de fichiers (S3, Hostinger object storage, etc.)
-    // plutôt que de conserver le base64 brut en base de données — voir note de déploiement.
-    valueProofUrl = valueProof;
   }
 
   try {
@@ -87,7 +62,6 @@ router.post('/intent', auth, async (req, res) => {
         listingId, clientId: req.user.id, carrierId: listing.carrier_id,
         weightKg: String(weightKg), baseAmount: String(base),
         declaredValue: String(declaredValueNum),
-        hasValueProof: String(!!valueProofUrl),
       },
     };
 
@@ -126,21 +100,14 @@ router.post('/intent', auth, async (req, res) => {
     const pickupCode = generatePickupCode();
     const bookingId  = require('crypto').randomUUID();
 
-    // Valeur indicative conservée pour l'examen des litiges (preuve de bonne foi),
-    // mais NE détermine PAS le montant remboursable : HapyLogistic rembourse
-    // uniquement le prix du transport payé (client_total), jamais le contenu du
-    // colis — voir CGU §6 et §8. Ce champ aide simplement à distinguer une
-    // réclamation crédible (valeur déclarée + preuve) d'une réclamation suspecte.
-    const compensationCap = valueProofUrl ? declaredValueNum : defaultCompensationCap(weightKg);
-
     await db.execute(`
       INSERT INTO bookings
         (id, listing_id, client_id, carrier_id, weight_kg, parcel_type,
          recipient_name, recipient_phone, special_notes,
          base_amount, client_fee, carrier_fee, client_total, carrier_net, platform_fee,
-         declared_value, value_proof_url, compensation_cap,
+         declared_value,
          payment_intent_id, pickup_code, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_payment')
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_payment')
     `, [
       bookingId, listingId, req.user.id, listing.carrier_id,
       parseFloat(weightKg), parcelType || null,
@@ -148,7 +115,7 @@ router.post('/intent', auth, async (req, res) => {
       base,
       amounts.clientFee  / 100, amounts.carrierFee / 100,
       amounts.clientTotal/ 100, amounts.carrierNet / 100, amounts.platformFee / 100,
-      declaredValueNum, valueProofUrl, compensationCap,
+      declaredValueNum,
       pi.id, pickupCode,
     ]);
 
@@ -171,8 +138,7 @@ router.post('/intent', auth, async (req, res) => {
         total:       (amounts.clientTotal / 100).toFixed(2),
         carrierGets: (amounts.carrierNet  / 100).toFixed(2),
       },
-      declaredValue:   declaredValueNum,
-      compensationCap,
+      declaredValue: declaredValueNum,
     });
 
   } catch (err) {
@@ -373,7 +339,7 @@ router.post('/capture/:id', auth, async (req, res) => {
 // ── POST /api/payments/refund/:id ────────────────────────────
 // IMPORTANT : HapyLogistic rembourse uniquement le prix du transport payé par le
 // client (client_total), jamais la valeur du contenu du colis. La plateforme n'est
-// pas un assureur de marchandises — voir CGU §6 et §8. declared_value / compensation_cap
+// pas un assureur de marchandises — voir CGU §6 et §8. declared_value
 // servent uniquement de preuve de bonne foi lors de l'examen du litige, pas de base
 // de calcul du remboursement.
 router.post('/refund/:id', auth, async (req, res) => {
