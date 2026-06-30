@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 //  HapyLogistic — emailService.js
 //  Emails transactionnels via Resend
-//  
+//
 //  Installation : npm install resend
 //  Variable d'environnement requise : RESEND_API_KEY
 //
@@ -19,9 +19,9 @@ const { Resend } = require('resend');
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-const FROM_EMAIL = 'HapyLogistic <noreply@hapylogistic.com>';
+const FROM_EMAIL    = 'HapyLogistic <noreply@hapylogistic.com>';
 const SUPPORT_EMAIL = 'support@hapylogistic.com';
-const BASE_URL = 'https://hapylogistic.com';
+const BASE_URL      = 'https://hapylogistic.com';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -33,9 +33,12 @@ function formatCurrency(amount) {
 function formatDate(dateStr) {
   const d = new Date(dateStr);
   if (isNaN(d.getTime())) return '—';
-  return d.toLocaleDateString('fr-FR', {
-    day: 'numeric', month: 'long', year: 'numeric'
-  });
+  return d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+// CORRECTION 3 : année dynamique dans le footer (plus de "© 2025" figé)
+function currentYear() {
+  return new Date().getFullYear();
 }
 
 // Template HTML de base — wrapper commun à tous les emails
@@ -93,7 +96,7 @@ function wrapEmail({ title, previewText, body }) {
       </div>
       <div class="footer">
         <p>
-          © 2025 HapyLogistic · <a href="${BASE_URL}/pages/legal.html">Mentions légales</a> · <a href="${BASE_URL}/pages/legal.html?tab=privacy">Confidentialité</a><br>
+          © ${currentYear()} HapyLogistic · <a href="${BASE_URL}/pages/legal.html">Mentions légales</a> · <a href="${BASE_URL}/pages/legal.html?tab=privacy">Confidentialité</a><br>
           Des questions ? <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>
         </p>
       </div>
@@ -104,16 +107,12 @@ function wrapEmail({ title, previewText, body }) {
 }
 
 // ── 1. Confirmation de réservation au client ──────────────────────────────────
-// CORRECTION : utilisation des champs snake_case tels que retournés par MySQL
-// (booking.weight_kg, listing.price_per_kg, listing.departure_date)
-// + lecture directe des montants déjà calculés et stockés en BDD (booking.base_amount,
-//   booking.client_fee, booking.client_total) plutôt que de les recalculer.
 
 async function sendBookingConfirmation({ to, firstName, booking, listing, pickupCode }) {
-  const weight       = booking.weight_kg ?? booking.weight;
-  const base         = booking.base_amount;
-  const clientFee    = booking.client_fee;
-  const clientTotal  = booking.client_total;
+  const weight      = booking.weight_kg ?? booking.weight;
+  const base        = booking.base_amount;
+  const clientFee   = booking.client_fee;
+  const clientTotal = booking.client_total;
 
   const html = wrapEmail({
     title: 'Votre réservation est confirmée — HapyLogistic',
@@ -371,12 +370,12 @@ async function sendDeliveryRequest({ to, firstName, booking, listing }) {
 }
 
 // ── 5. Réception confirmée → paiement envoyé au transporteur ─────────────────
-// CORRECTION : la commission est lue depuis booking.platform_fee (déjà calculée
-// et stockée en BDD) plutôt que recalculée depuis listing.pricePerKg (undefined)
+// CORRECTION 1 : délai corrigé de "2-3 jours ouvrés" à "3 à 7 jours ouvrés"
+// pour être cohérent avec les CGU, la page Tarifs et le reste du site.
 
 async function sendReceiptConfirmed({ to, carrierFirstName, booking, listing, netAmount }) {
-  const weight       = booking.weight_kg ?? booking.weight;
-  const platformFee  = booking.platform_fee;
+  const weight      = booking.weight_kg ?? booking.weight;
+  const platformFee = booking.platform_fee;
 
   const html = wrapEmail({
     title: 'Paiement en cours de virement — HapyLogistic',
@@ -386,7 +385,7 @@ async function sendReceiptConfirmed({ to, carrierFirstName, booking, listing, ne
       <p class="subtitle">Bonjour ${carrierFirstName}, le client a confirmé la réception du colis. Votre paiement est libéré.</p>
 
       <div class="alert success">
-        ✅ La livraison est confirmée. Votre paiement a été déclenché et sera sur votre compte sous 2-3 jours ouvrés.
+        ✅ La livraison est confirmée. Votre paiement a été déclenché et sera sur votre compte sous <strong>3 à 7 jours ouvrés</strong> selon votre banque et votre pays.
       </div>
 
       <div class="section">
@@ -412,7 +411,7 @@ async function sendReceiptConfirmed({ to, carrierFirstName, booking, listing, ne
       </div>
 
       <div class="alert">
-        <strong>Délai :</strong> Le virement arrive sous 2-3 jours ouvrés selon votre banque. Vérifiez dans vos revenus sur votre tableau de bord.
+        <strong>Délai :</strong> Le virement arrive sous 3 à 7 jours ouvrés selon votre banque et votre pays de résidence. Vérifiez dans vos revenus sur votre tableau de bord.
       </div>
 
       <hr class="divider">
@@ -432,6 +431,10 @@ async function sendReceiptConfirmed({ to, carrierFirstName, booking, listing, ne
 }
 
 // ── 6. Remboursement au client ────────────────────────────────────────────────
+// CORRECTION 2 : ajout d'une note explicite que le remboursement couvre le prix
+// du transport uniquement (pas la valeur du contenu du colis), conformément aux
+// CGU §6 et §8. Évite toute confusion ou contestation si le client attendait
+// une indemnisation du contenu.
 
 async function sendRefundNotification({ to, firstName, booking, listing, refundAmount, reason }) {
   const html = wrapEmail({
@@ -465,6 +468,10 @@ async function sendRefundNotification({ to, firstName, booking, listing, refundA
             <div class="info-value" style="font-size:13px;font-family:monospace">#${booking.id?.slice(0,8).toUpperCase()}</div>
           </div>
         </div>
+      </div>
+
+      <div class="alert">
+        ℹ️ <strong>Périmètre du remboursement :</strong> Conformément à nos <a href="${BASE_URL}/pages/legal.html" style="color:#4a3fa0">Conditions Générales d'Utilisation (§6 et §8)</a>, HapyLogistic rembourse le prix du transport payé. La valeur du contenu du colis ne fait pas l'objet d'un remboursement par la plateforme — pour couvrir la valeur de vos envois, nous vous recommandons de souscrire une assurance tierce indépendante.
       </div>
 
       <hr class="divider">
@@ -511,7 +518,7 @@ async function sendDisputeOpened({ clientEmail, carrierEmail, client, carrier, b
         </div>
       </div>
 
-      <p style="font-size:14px;color:#6b7280">Votre paiement reste bloqué en escrow Stripe jusqu'à résolution du litige.</p>
+      <p style="font-size:14px;color:#6b7280">Votre paiement reste bloqué en escrow Stripe jusqu'à résolution du litige. En cas de litige reconnu fondé, le remboursement porte sur le prix du transport payé, conformément à nos <a href="${BASE_URL}/pages/legal.html" style="color:#6c63ff">CGU §8</a>.</p>
 
       <hr class="divider">
       <div style="text-align:center">
