@@ -69,6 +69,7 @@ app.use('/api/reviews',  require('./routes/reviews'));
 app.use('/api/disputes', require('./routes/disputes'));
 app.use('/api/messages', require('./routes/messages'));
 app.use('/api/webhooks', require('./routes/webhooks'));
+app.use('/api/gdpr',     require('./routes/gdpr'));
 
 // ── Health check ──────────────────────────────
 app.get('/health', (req, res) => {
@@ -105,6 +106,8 @@ app.get('/', (req, res) => {
       'GET  /api/messages/:bookingId',
       'POST /api/messages/:bookingId',
       'GET  /api/config',
+      'POST /api/gdpr/delete-account',
+      'GET  /api/gdpr/export',
     ]
   });
 });
