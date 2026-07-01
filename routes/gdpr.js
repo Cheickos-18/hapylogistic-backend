@@ -75,7 +75,6 @@ router.post('/delete-account', auth, async (req, res) => {
         password_hash     = ?,
         profile_photo     = NULL,
         bio               = NULL,
-        destination       = NULL,
         stripe_customer_id = NULL,
         deleted_at        = NOW(),
         is_deleted        = 1
@@ -153,7 +152,7 @@ router.get('/export', auth, async (req, res) => {
   try {
     // Données personnelles du compte
     const [userRows] = await db.execute(
-      'SELECT id, first_name, last_name, email, phone, role, created_at, destination, total_trips FROM users WHERE id = ?',
+      'SELECT id, first_name, last_name, email, phone, role, created_at, total_trips FROM users WHERE id = ?',
       [userId]
     );
     if (!userRows.length) return res.status(404).json({ error: 'Compte introuvable' });
