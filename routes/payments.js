@@ -258,7 +258,87 @@ router.post('/confirm-delivery/:id', auth, async (req, res) => {
   }
 });
 
-// ── POST /api/payments/confirm-receipt/:id ───────────────────
+// ── POST /api/payments/carrier-cancel/:id ────────────────────
+// Annulation par le transporteur — remboursement intégral au client,
+// kg remis en stock, email de notification.
+// Conditions : statut 'paid' uniquement (pas encore collecté).
+// Si le colis est déjà en transit (in_transit), l'annulation est bloquée
+// et le transporteur doit contacter le support pour ouvrir un litige.
+router.post('/carrier-cancel/:id', auth, async (req, res) => {
+  const { reason } = req.body;
+
+  try {
+    const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Réservation introuvable' });
+    const booking = rows[0];
+
+    // Seul le transporteur concerné peut annuler
+    if (booking.carrier_id !== req.user.id) {
+      return res.status(403).json({ error: 'Réservé au transporteur de cette réservation' });
+    }
+
+    // Annulation uniquement si le colis n'a pas encore été collecté
+    if (!['paid', 'awaiting_payment'].includes(booking.status)) {
+      return res.status(400).json({
+        error: booking.status === 'in_transit'
+          ? 'Le colis est déjà en transit. Contactez le support pour résoudre cette situation.'
+          : `Impossible d'annuler une réservation en statut "${booking.status}".`,
+      });
+    }
+
+    // Annuler ou rembourser via Stripe
+    const pi = await stripe.paymentIntents.retrieve(booking.payment_intent_id);
+    if (pi.status === 'requires_capture') {
+      await stripe.paymentIntents.cancel(booking.payment_intent_id);
+    } else if (pi.status === 'succeeded') {
+      await stripe.refunds.create({
+        payment_intent: booking.payment_intent_id,
+        reason: 'requested_by_customer',
+      });
+    } else if (!['canceled', 'requires_payment_method'].includes(pi.status)) {
+      return res.status(400).json({ error: `Impossible d'annuler un paiement en statut: ${pi.status}` });
+    }
+
+    // Mettre à jour le statut et remettre les kg en stock
+    await db.execute(
+      'UPDATE bookings SET status = ?, carrier_cancelled_at = NOW(), carrier_cancel_reason = ? WHERE id = ?',
+      ['carrier_cancelled', reason || null, booking.id]
+    );
+    await db.execute(
+      'UPDATE listings SET available_kg = available_kg + ?, status = ? WHERE id = ?',
+      [parseFloat(booking.weight_kg), 'active', booking.listing_id]
+    );
+
+    // Emails de notification
+    try {
+      const [listings]   = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
+      const [clientRows] = await db.execute('SELECT * FROM users WHERE id = ?', [booking.client_id]);
+      const [carrierRows]= await db.execute('SELECT * FROM users WHERE id = ?', [booking.carrier_id]);
+      if (listings.length && clientRows.length) {
+        await email.sendRefundNotification({
+          to:           clientRows[0].email,
+          firstName:    clientRows[0].first_name,
+          booking,
+          listing:      listings[0],
+          refundAmount: parseFloat(booking.client_total),
+          reason:       `Annulation par le transporteur${reason ? ' : ' + reason : ''}. Remboursement intégral.`,
+        });
+      }
+    } catch (emailErr) {
+      console.error('[EMAIL] carrier-cancel notification failed:', emailErr.message);
+    }
+
+    res.json({
+      success: true,
+      message: 'Réservation annulée — le client sera remboursé intégralement.',
+    });
+  } catch (err) {
+    console.error('Erreur carrier-cancel:', err.message);
+    res.status(500).json({ error: 'Erreur lors de l\'annulation' });
+  }
+});
+
+
 router.post('/confirm-receipt/:id', auth, async (req, res) => {
   try {
     const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
