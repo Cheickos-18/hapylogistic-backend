@@ -142,6 +142,7 @@ router.get('/:id', async (req, res) => {
       carrierLevel: r.carrier_level, carrierTrips: r.total_trips,
       carrierRating: parseFloat(r.average_rating) || 0,
       from: r.origin, to: r.destination,
+      countryFrom: r.country_from, countryTo: r.country_to,
       date: r.departure_date, kg: parseFloat(r.available_kg),
       price: parseFloat(r.price_per_kg), type: r.type,
       description: r.description, status: r.status,
@@ -159,11 +160,6 @@ router.post('/', auth, async (req, res) => {
     return res.status(403).json({ error: 'Réservé aux transporteurs' });
   }
 
-  // ── Vérification KYC ──────────────────────────────────────
-  // Le JWT ne contient pas le statut à jour (il peut avoir changé
-  // depuis la connexion, via le webhook Stripe account.updated).
-  // On bloque la publication tant que la vérification d'identité
-  // Stripe Connect n'est pas terminée.
   try {
     const [userRows] = await db.execute('SELECT status FROM users WHERE id = ?', [req.user.id]);
     if (!userRows.length || userRows[0].status === 'pending_kyc') {
@@ -199,7 +195,8 @@ router.post('/', auth, async (req, res) => {
 
 // ── PATCH /api/listings/:id ──────────────────
 router.patch('/:id', auth, async (req, res) => {
-  const { origin, destination, departureDate, type, availableKg, pricePerKg, description, status, pickupMode, pickupCities } = req.body;
+  // CORRECTION : countryFrom et countryTo ajoutés pour ne pas perdre les drapeaux lors d'une modification
+  const { origin, destination, countryFrom, countryTo, departureDate, type, availableKg, pricePerKg, description, status, pickupMode, pickupCities } = req.body;
   try {
     const [rows] = await db.execute(
       'SELECT * FROM listings WHERE id = ? AND carrier_id = ?',
@@ -210,12 +207,10 @@ router.patch('/:id', auth, async (req, res) => {
 
     let refundedBookings = 0;
 
-    // Si mise en pause → rembourser les réservations paid
     if (status && status === 'inactive' && listing.status === 'active') {
       refundedBookings += await refundListingBookings(req.params.id, 'listing_paused');
     }
 
-    // Si le prix augmente de plus de 20% → rembourser les réservations paid
     if (pricePerKg && parseFloat(pricePerKg) > parseFloat(listing.price_per_kg) * 1.2) {
       refundedBookings += await refundListingBookings(req.params.id, 'price_increase');
     }
@@ -225,6 +220,8 @@ router.patch('/:id', auth, async (req, res) => {
 
     if (origin        !== undefined) { updates.push('origin = ?');        params.push(origin); }
     if (destination   !== undefined) { updates.push('destination = ?');   params.push(destination); }
+    if (countryFrom   !== undefined) { updates.push('country_from = ?');  params.push(countryFrom || null); }
+    if (countryTo     !== undefined) { updates.push('country_to = ?');    params.push(countryTo   || null); }
     if (departureDate !== undefined) { updates.push('departure_date = ?');params.push(departureDate); }
     if (type          !== undefined) { updates.push('type = ?');          params.push(type); }
     if (availableKg   !== undefined) { updates.push('available_kg = ?');  params.push(parseFloat(availableKg)); }
