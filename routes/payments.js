@@ -364,7 +364,15 @@ router.post('/confirm-receipt/:id', auth, async (req, res) => {
       ['completed', booking.id]
     );
     await db.execute(
-      'UPDATE users SET total_trips = total_trips + 1 WHERE id = ?',
+      `UPDATE users SET
+        total_trips = total_trips + 1,
+        carrier_level = CASE
+          WHEN total_trips + 1 >= 100 THEN 'platine'
+          WHEN total_trips + 1 >= 30  THEN 'or'
+          WHEN total_trips + 1 >= 10  THEN 'argent'
+          ELSE 'bronze'
+        END
+       WHERE id = ?`,
       [booking.carrier_id]
     );
 
@@ -406,7 +414,15 @@ router.post('/capture/:id', auth, async (req, res) => {
     await stripe.paymentIntents.capture(booking.payment_intent_id);
     await db.execute('UPDATE bookings SET status = ? WHERE id = ?', ['completed', booking.id]);
     await db.execute(
-      'UPDATE users SET total_trips = total_trips + 1 WHERE id = ?',
+      `UPDATE users SET
+        total_trips = total_trips + 1,
+        carrier_level = CASE
+          WHEN total_trips + 1 >= 100 THEN 'platine'
+          WHEN total_trips + 1 >= 30  THEN 'or'
+          WHEN total_trips + 1 >= 10  THEN 'argent'
+          ELSE 'bronze'
+        END
+       WHERE id = ?`,
       [booking.carrier_id]
     );
     res.json({ success: true, message: 'Paiement capturé — virement au transporteur initié (sous 3 à 7 jours)' });
