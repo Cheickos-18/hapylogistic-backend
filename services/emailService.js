@@ -1,18 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
 //  HapyLogistic — emailService.js
 //  Emails transactionnels via Resend
-//
-//  Installation : npm install resend
-//  Variable d'environnement requise : RESEND_API_KEY
-//
-//  Emails gérés :
-//  1. sendBookingConfirmation    — client après paiement (avec code de collecte)
-//  2. sendNewBookingToCarrier    — transporteur quand réservation reçue
-//  3. sendPickupConfirmed        — client quand collecte confirmée par transporteur
-//  4. sendDeliveryRequest        — client quand livraison marquée → demande confirmation
-//  5. sendReceiptConfirmed       — transporteur quand réception confirmée → paiement envoyé
-//  6. sendRefundNotification     — client en cas de remboursement
-//  7. sendDisputeOpened          — équipe interne + transporteur quand litige ouvert
 // ─────────────────────────────────────────────────────────────────────────────
 
 const { Resend } = require('resend');
@@ -22,8 +10,6 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const FROM_EMAIL    = 'HapyLogistic <noreply@hapylogistic.com>';
 const SUPPORT_EMAIL = 'support@hapylogistic.com';
 const BASE_URL      = 'https://hapylogistic.com';
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function formatCurrency(amount) {
   const n = Number(amount);
@@ -36,12 +22,10 @@ function formatDate(dateStr) {
   return d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
 }
 
-// CORRECTION 3 : année dynamique dans le footer (plus de "© 2025" figé)
 function currentYear() {
   return new Date().getFullYear();
 }
 
-// Template HTML de base — wrapper commun à tous les emails
 function wrapEmail({ title, previewText, body }) {
   return `<!DOCTYPE html>
 <html lang="fr">
@@ -72,7 +56,6 @@ function wrapEmail({ title, previewText, body }) {
     .pickup-code-value { font-size:36px; font-weight:900; color:#6c63ff; letter-spacing:8px; font-family:monospace; }
     .pickup-code-hint { font-size:12px; color:#9ca3af; margin-top:8px; }
     .btn { display:inline-block; background:#6c63ff; color:#fff !important; text-decoration:none; padding:14px 32px; border-radius:10px; font-weight:700; font-size:15px; margin-top:8px; }
-    .btn-outline { background:transparent; color:#6c63ff !important; border:2px solid #6c63ff; }
     .alert { border-left:4px solid #6c63ff; background:#f0f0ff; border-radius:0 10px 10px 0; padding:16px 20px; margin:20px 0; font-size:14px; color:#4a3fa0; }
     .alert.success { border-color:#10b981; background:#f0fdf4; color:#065f46; }
     .alert.warning { border-color:#f59e0b; background:#fffbeb; color:#92400e; }
@@ -80,7 +63,6 @@ function wrapEmail({ title, previewText, body }) {
     .footer { background:#f9f9ff; padding:24px 40px; text-align:center; }
     .footer p { font-size:12px; color:#9ca3af; line-height:1.8; }
     .footer a { color:#6c63ff; text-decoration:none; }
-    .badge { display:inline-block; background:#6c63ff15; color:#6c63ff; padding:4px 12px; border-radius:20px; font-size:12px; font-weight:600; }
     @media(max-width:480px) { .body { padding:24px; } .info-grid { grid-template-columns:1fr; } .header { padding:24px; } }
   </style>
 </head>
@@ -134,36 +116,18 @@ async function sendBookingConfirmation({ to, firstName, booking, listing, pickup
       <div class="section">
         <div class="section-title">📦 Détails de l'envoi</div>
         <div class="info-grid">
-          <div class="info-item">
-            <div class="info-label">Départ</div>
-            <div class="info-value">${listing.origin}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Destination</div>
-            <div class="info-value">${listing.destination}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Date de départ</div>
-            <div class="info-value">${formatDate(listing.departure_date)}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Poids réservé</div>
-            <div class="info-value">${weight} kg</div>
-          </div>
+          <div class="info-item"><div class="info-label">Départ</div><div class="info-value">${listing.origin}</div></div>
+          <div class="info-item"><div class="info-label">Destination</div><div class="info-value">${listing.destination}</div></div>
+          <div class="info-item"><div class="info-label">Date de départ</div><div class="info-value">${formatDate(listing.departure_date)}</div></div>
+          <div class="info-item"><div class="info-label">Poids réservé</div><div class="info-value">${weight} kg</div></div>
         </div>
       </div>
 
       <div class="section">
         <div class="section-title">💰 Récapitulatif de paiement</div>
         <div class="info-grid">
-          <div class="info-item">
-            <div class="info-label">Prix de base</div>
-            <div class="info-value">${formatCurrency(base)}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Frais de service (8% + 0,25 €)</div>
-            <div class="info-value">${formatCurrency(clientFee)}</div>
-          </div>
+          <div class="info-item"><div class="info-label">Prix de base</div><div class="info-value">${formatCurrency(base)}</div></div>
+          <div class="info-item"><div class="info-label">Frais de service (8% + 0,25 €)</div><div class="info-value">${formatCurrency(clientFee)}</div></div>
           <div class="info-item" style="grid-column:1/-1;background:#6c63ff08;border:1px solid #6c63ff20">
             <div class="info-label">Total payé</div>
             <div class="info-value" style="font-size:18px;color:#6c63ff">${formatCurrency(clientTotal)}</div>
@@ -176,7 +140,6 @@ async function sendBookingConfirmation({ to, firstName, booking, listing, pickup
       </div>
 
       <hr class="divider">
-
       <div style="text-align:center">
         <a href="${BASE_URL}/pages/dashboard-client.html" class="btn">Voir ma réservation →</a>
       </div>
@@ -184,14 +147,16 @@ async function sendBookingConfirmation({ to, firstName, booking, listing, pickup
   });
 
   return resend.emails.send({
-    from: FROM_EMAIL,
-    to,
+    from: FROM_EMAIL, to,
     subject: `✅ Réservation confirmée — Code de collecte : ${pickupCode}`,
     html,
   });
 }
 
 // ── 2. Nouvelle réservation au transporteur ───────────────────────────────────
+// CONFIDENTIALITÉ : l'email du client n'est pas transmis au transporteur.
+// Toute communication doit passer par la messagerie interne HapyLogistic
+// conformément aux CGU §9 (anti-contournement).
 
 async function sendNewBookingToCarrier({ to, carrierFirstName, booking, listing, client }) {
   const weight     = booking.weight_kg ?? booking.weight;
@@ -208,29 +173,17 @@ async function sendNewBookingToCarrier({ to, carrierFirstName, booking, listing,
         <div class="section-title">👤 Client</div>
         <div class="info-item" style="margin-bottom:0">
           <div class="info-value">${client.firstName} ${client.lastName}</div>
-          <div class="info-label" style="margin-top:4px">${client.email}</div>
+          <div class="info-label" style="margin-top:4px">Pour contacter ce client, utilisez la messagerie interne HapyLogistic depuis votre tableau de bord.</div>
         </div>
       </div>
 
       <div class="section">
         <div class="section-title">📦 Détails du colis</div>
         <div class="info-grid">
-          <div class="info-item">
-            <div class="info-label">Poids</div>
-            <div class="info-value">${weight} kg</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Votre gain net</div>
-            <div class="info-value" style="color:#10b981">${formatCurrency(carrierNet)}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Trajet</div>
-            <div class="info-value">${listing.origin} → ${listing.destination}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Date de départ</div>
-            <div class="info-value">${formatDate(listing.departure_date)}</div>
-          </div>
+          <div class="info-item"><div class="info-label">Poids</div><div class="info-value">${weight} kg</div></div>
+          <div class="info-item"><div class="info-label">Votre gain net</div><div class="info-value" style="color:#10b981">${formatCurrency(carrierNet)}</div></div>
+          <div class="info-item"><div class="info-label">Trajet</div><div class="info-value">${listing.origin} → ${listing.destination}</div></div>
+          <div class="info-item"><div class="info-label">Date de départ</div><div class="info-value">${formatDate(listing.departure_date)}</div></div>
         </div>
       </div>
 
@@ -240,15 +193,14 @@ async function sendNewBookingToCarrier({ to, carrierFirstName, booking, listing,
         <div class="info-item">
           <div class="info-value" style="font-weight:400;font-size:14px;line-height:1.6">${booking.special_notes}</div>
         </div>
-      </div>
-      ` : ''}
+      </div>` : ''}
 
       <div class="alert">
-        <strong>Prochaine étape :</strong> Acceptez la réservation depuis votre tableau de bord pour confirmer la collecte. Le client vous communiquera le code de collecte lors de la remise du colis.
+        <strong>Prochaine étape :</strong> Acceptez la réservation depuis votre tableau de bord. Le client vous communiquera le code de collecte lors de la remise physique du colis.<br><br>
+        ⚠️ <strong>Rappel CGU §9 :</strong> Tout échange ou paiement en dehors de la plateforme est interdit et dégage HapyLogistic de toute responsabilité.
       </div>
 
       <hr class="divider">
-
       <div style="text-align:center">
         <a href="${BASE_URL}/pages/dashboard-carrier.html" class="btn">Gérer mes réservations →</a>
       </div>
@@ -256,8 +208,7 @@ async function sendNewBookingToCarrier({ to, carrierFirstName, booking, listing,
   });
 
   return resend.emails.send({
-    from: FROM_EMAIL,
-    to,
+    from: FROM_EMAIL, to,
     subject: `📬 Nouvelle réservation — ${weight}kg · ${listing.origin} → ${listing.destination}`,
     html,
   });
@@ -273,38 +224,23 @@ async function sendPickupConfirmed({ to, firstName, booking, listing }) {
       <h1>Colis collecté ! 🚀</h1>
       <p class="subtitle">Bonjour ${firstName}, votre colis a bien été pris en charge par le transporteur.</p>
 
-      <div class="alert success">
-        ✅ Le transporteur a confirmé la collecte de votre colis. Votre envoi est maintenant en route !
-      </div>
+      <div class="alert success">✅ Le transporteur a confirmé la collecte. Votre envoi est en route !</div>
 
       <div class="section">
-        <div class="section-title">📍 Suivi de l'envoi</div>
+        <div class="section-title">📍 Suivi</div>
         <div class="info-grid">
-          <div class="info-item">
-            <div class="info-label">Statut</div>
-            <div class="info-value"><span class="badge">En transit</span></div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Destination</div>
-            <div class="info-value">${listing.destination}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Date de collecte</div>
-            <div class="info-value">${formatDate(new Date().toISOString())}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Référence</div>
-            <div class="info-value" style="font-size:13px;font-family:monospace">#${booking.id?.slice(0,8).toUpperCase()}</div>
-          </div>
+          <div class="info-item"><div class="info-label">Statut</div><div class="info-value">En transit</div></div>
+          <div class="info-item"><div class="info-label">Destination</div><div class="info-value">${listing.destination}</div></div>
+          <div class="info-item"><div class="info-label">Date de collecte</div><div class="info-value">${formatDate(new Date().toISOString())}</div></div>
+          <div class="info-item"><div class="info-label">Référence</div><div class="info-value" style="font-size:13px;font-family:monospace">#${booking.id?.slice(0,8).toUpperCase()}</div></div>
         </div>
       </div>
 
       <div class="alert">
-        <strong>Rappel :</strong> Votre paiement reste bloqué en escrow Stripe jusqu'à ce que vous confirmiez la réception. Vous recevrez un email dès que le transporteur marque la livraison.
+        <strong>Rappel :</strong> Votre paiement reste bloqué en escrow jusqu'à confirmation de la réception.
       </div>
 
       <hr class="divider">
-
       <div style="text-align:center">
         <a href="${BASE_URL}/pages/dashboard-client.html" class="btn">Suivre mon envoi →</a>
       </div>
@@ -312,8 +248,7 @@ async function sendPickupConfirmed({ to, firstName, booking, listing }) {
   });
 
   return resend.emails.send({
-    from: FROM_EMAIL,
-    to,
+    from: FROM_EMAIL, to,
     subject: `🚀 Colis collecté — En route vers ${listing.destination}`,
     html,
   });
@@ -325,35 +260,28 @@ async function sendDeliveryRequest({ to, firstName, booking, listing }) {
   const weight = booking.weight_kg ?? booking.weight;
 
   const html = wrapEmail({
-    title: 'Confirmez la réception de votre colis — HapyLogistic',
-    previewText: `Le transporteur a marqué votre colis comme livré. Confirmez la réception pour libérer le paiement.`,
+    title: 'Confirmez la réception — HapyLogistic',
+    previewText: `Le transporteur a marqué votre colis comme livré. Confirmez la réception.`,
     body: `
       <h1>Votre colis est arrivé ! 📦</h1>
-      <p class="subtitle">Bonjour ${firstName}, le transporteur a marqué votre envoi comme livré. Veuillez confirmer la réception.</p>
+      <p class="subtitle">Bonjour ${firstName}, le transporteur a marqué votre envoi comme livré.</p>
 
       <div class="alert warning">
-        ⏳ <strong>Action requise :</strong> Vous avez <strong>48 heures</strong> pour confirmer ou contester la livraison. Sans action de votre part, le paiement sera automatiquement libéré au transporteur.
+        ⏳ <strong>Action requise :</strong> Vous avez <strong>48 heures</strong> pour confirmer ou contester. Sans action, le paiement sera libéré automatiquement.
       </div>
 
       <div class="section">
         <div class="section-title">📦 Votre envoi</div>
         <div class="info-grid">
-          <div class="info-item">
-            <div class="info-label">Trajet</div>
-            <div class="info-value">${listing.origin} → ${listing.destination}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Poids</div>
-            <div class="info-value">${weight} kg</div>
-          </div>
+          <div class="info-item"><div class="info-label">Trajet</div><div class="info-value">${listing.origin} → ${listing.destination}</div></div>
+          <div class="info-item"><div class="info-label">Poids</div><div class="info-value">${weight} kg</div></div>
         </div>
       </div>
 
       <hr class="divider">
-
       <div style="text-align:center;margin-bottom:16px">
         <p style="margin-bottom:20px;color:#6b7280;font-size:14px">Le colis est bien arrivé en bon état ?</p>
-        <a href="${BASE_URL}/pages/dashboard-client.html" class="btn" style="margin-right:12px">✅ Confirmer la réception</a>
+        <a href="${BASE_URL}/pages/dashboard-client.html" class="btn">✅ Confirmer la réception</a>
       </div>
       <div style="text-align:center">
         <p style="font-size:13px;color:#9ca3af">Un problème ? <a href="${BASE_URL}/pages/dashboard-client.html" style="color:#ef4444;font-weight:600">Ouvrir un litige</a></p>
@@ -362,16 +290,13 @@ async function sendDeliveryRequest({ to, firstName, booking, listing }) {
   });
 
   return resend.emails.send({
-    from: FROM_EMAIL,
-    to,
+    from: FROM_EMAIL, to,
     subject: `📦 Colis livré — Confirmez la réception pour libérer le paiement`,
     html,
   });
 }
 
 // ── 5. Réception confirmée → paiement envoyé au transporteur ─────────────────
-// CORRECTION 1 : délai corrigé de "2-3 jours ouvrés" à "3 à 7 jours ouvrés"
-// pour être cohérent avec les CGU, la page Tarifs et le reste du site.
 
 async function sendReceiptConfirmed({ to, carrierFirstName, booking, listing, netAmount }) {
   const weight      = booking.weight_kg ?? booking.weight;
@@ -382,27 +307,18 @@ async function sendReceiptConfirmed({ to, carrierFirstName, booking, listing, ne
     previewText: `Le client a confirmé la réception. Votre virement de ${formatCurrency(netAmount)} est en route !`,
     body: `
       <h1>Paiement en route ! 💸</h1>
-      <p class="subtitle">Bonjour ${carrierFirstName}, le client a confirmé la réception du colis. Votre paiement est libéré.</p>
+      <p class="subtitle">Bonjour ${carrierFirstName}, le client a confirmé la réception. Votre paiement est libéré.</p>
 
       <div class="alert success">
-        ✅ La livraison est confirmée. Votre paiement a été déclenché et sera sur votre compte sous <strong>3 à 7 jours ouvrés</strong> selon votre banque et votre pays.
+        ✅ Votre paiement a été déclenché et sera sur votre compte sous <strong>3 à 7 jours ouvrés</strong> selon votre banque.
       </div>
 
       <div class="section">
         <div class="section-title">💰 Détails du paiement</div>
         <div class="info-grid">
-          <div class="info-item">
-            <div class="info-label">Trajet</div>
-            <div class="info-value">${listing.origin} → ${listing.destination}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Poids transporté</div>
-            <div class="info-value">${weight} kg</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Commission HapyLogistic</div>
-            <div class="info-value" style="color:#ef4444">− ${formatCurrency(platformFee)}</div>
-          </div>
+          <div class="info-item"><div class="info-label">Trajet</div><div class="info-value">${listing.origin} → ${listing.destination}</div></div>
+          <div class="info-item"><div class="info-label">Poids transporté</div><div class="info-value">${weight} kg</div></div>
+          <div class="info-item"><div class="info-label">Commission HapyLogistic</div><div class="info-value" style="color:#ef4444">− ${formatCurrency(platformFee)}</div></div>
           <div class="info-item" style="background:#f0fdf4;border:1px solid #bbf7d0">
             <div class="info-label">Montant net viré</div>
             <div class="info-value" style="color:#10b981;font-size:20px">${formatCurrency(netAmount)}</div>
@@ -410,12 +326,7 @@ async function sendReceiptConfirmed({ to, carrierFirstName, booking, listing, ne
         </div>
       </div>
 
-      <div class="alert">
-        <strong>Délai :</strong> Le virement arrive sous 3 à 7 jours ouvrés selon votre banque et votre pays de résidence. Vérifiez dans vos revenus sur votre tableau de bord.
-      </div>
-
       <hr class="divider">
-
       <div style="text-align:center">
         <a href="${BASE_URL}/pages/dashboard-carrier.html" class="btn">Voir mes revenus →</a>
       </div>
@@ -423,66 +334,47 @@ async function sendReceiptConfirmed({ to, carrierFirstName, booking, listing, ne
   });
 
   return resend.emails.send({
-    from: FROM_EMAIL,
-    to,
+    from: FROM_EMAIL, to,
     subject: `💸 Paiement viré — ${formatCurrency(netAmount)} pour votre trajet ${listing.origin} → ${listing.destination}`,
     html,
   });
 }
 
 // ── 6. Remboursement au client ────────────────────────────────────────────────
-// CORRECTION 2 : ajout d'une note explicite que le remboursement couvre le prix
-// du transport uniquement (pas la valeur du contenu du colis), conformément aux
-// CGU §6 et §8. Évite toute confusion ou contestation si le client attendait
-// une indemnisation du contenu.
 
 async function sendRefundNotification({ to, firstName, booking, listing, refundAmount, reason }) {
   const html = wrapEmail({
     title: 'Remboursement en cours — HapyLogistic',
-    previewText: `Votre remboursement de ${formatCurrency(refundAmount)} est en cours de traitement`,
+    previewText: `Votre remboursement de ${formatCurrency(refundAmount)} est en cours`,
     body: `
       <h1>Remboursement en cours 🔄</h1>
       <p class="subtitle">Bonjour ${firstName}, votre remboursement a bien été initié.</p>
 
       <div class="alert warning">
-        🔄 Votre remboursement est en cours de traitement. Le montant apparaîtra sur votre relevé bancaire sous <strong>5 à 10 jours ouvrés</strong>.
+        🔄 Le montant apparaîtra sur votre relevé bancaire sous <strong>5 à 10 jours ouvrés</strong>.
       </div>
 
       <div class="section">
-        <div class="section-title">💰 Détails du remboursement</div>
+        <div class="section-title">💰 Détails</div>
         <div class="info-grid">
-          <div class="info-item">
-            <div class="info-label">Montant remboursé</div>
-            <div class="info-value" style="color:#10b981;font-size:18px">${formatCurrency(refundAmount)}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Motif</div>
-            <div class="info-value">${reason || 'Annulation'}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Trajet annulé</div>
-            <div class="info-value">${listing.origin} → ${listing.destination}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Référence</div>
-            <div class="info-value" style="font-size:13px;font-family:monospace">#${booking.id?.slice(0,8).toUpperCase()}</div>
-          </div>
+          <div class="info-item"><div class="info-label">Montant remboursé</div><div class="info-value" style="color:#10b981;font-size:18px">${formatCurrency(refundAmount)}</div></div>
+          <div class="info-item"><div class="info-label">Motif</div><div class="info-value">${reason || 'Annulation'}</div></div>
+          <div class="info-item"><div class="info-label">Trajet</div><div class="info-value">${listing.origin} → ${listing.destination}</div></div>
+          <div class="info-item"><div class="info-label">Référence</div><div class="info-value" style="font-size:13px;font-family:monospace">#${booking.id?.slice(0,8).toUpperCase()}</div></div>
         </div>
       </div>
 
       <div class="alert">
-        ℹ️ <strong>Périmètre du remboursement :</strong> Conformément à nos <a href="${BASE_URL}/pages/legal.html" style="color:#4a3fa0">Conditions Générales d'Utilisation (§6 et §8)</a>, HapyLogistic rembourse le prix du transport payé. La valeur du contenu du colis ne fait pas l'objet d'un remboursement par la plateforme — pour couvrir la valeur de vos envois, nous vous recommandons de souscrire une assurance tierce indépendante.
+        ℹ️ <strong>Périmètre du remboursement :</strong> HapyLogistic rembourse le prix du transport payé. La valeur du contenu du colis ne fait pas l'objet d'un remboursement — voir nos <a href="${BASE_URL}/pages/legal.html" style="color:#4a3fa0">CGU §6 et §8</a>.
       </div>
 
       <hr class="divider">
-
-      <p style="font-size:14px;color:#6b7280;text-align:center">Des questions sur votre remboursement ? Contactez-nous à <a href="mailto:${SUPPORT_EMAIL}" style="color:#6c63ff">${SUPPORT_EMAIL}</a></p>
+      <p style="font-size:14px;color:#6b7280;text-align:center">Questions ? <a href="mailto:${SUPPORT_EMAIL}" style="color:#6c63ff">${SUPPORT_EMAIL}</a></p>
     `
   });
 
   return resend.emails.send({
-    from: FROM_EMAIL,
-    to,
+    from: FROM_EMAIL, to,
     subject: `🔄 Remboursement de ${formatCurrency(refundAmount)} en cours`,
     html,
   });
@@ -491,82 +383,60 @@ async function sendRefundNotification({ to, firstName, booking, listing, refundA
 // ── 7. Litige ouvert ──────────────────────────────────────────────────────────
 
 async function sendDisputeOpened({ clientEmail, carrierEmail, client, carrier, booking, listing, reason }) {
-  // Email au client
   const clientHtml = wrapEmail({
     title: 'Litige ouvert — HapyLogistic',
-    previewText: `Votre litige a bien été ouvert. Notre équipe prend en charge dans les 48h.`,
+    previewText: `Votre litige a bien été ouvert. Notre équipe vous contacte sous 48h.`,
     body: `
       <h1>Litige ouvert 🔍</h1>
-      <p class="subtitle">Bonjour ${client.firstName}, votre litige a été enregistré. Notre équipe va l'examiner.</p>
+      <p class="subtitle">Bonjour ${client.firstName}, votre litige a été enregistré.</p>
 
       <div class="alert">
-        📋 <strong>Numéro de litige :</strong> #${booking.id?.slice(0,8).toUpperCase()}<br>
+        📋 <strong>Référence :</strong> #${booking.id?.slice(0,8).toUpperCase()}<br>
         Notre équipe vous répondra dans les <strong>48 heures ouvrées</strong>.
       </div>
 
       <div class="section">
-        <div class="section-title">📝 Détails du litige</div>
+        <div class="section-title">📝 Détails</div>
         <div class="info-grid">
-          <div class="info-item">
-            <div class="info-label">Motif</div>
-            <div class="info-value">${reason}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Trajet concerné</div>
-            <div class="info-value">${listing.origin} → ${listing.destination}</div>
-          </div>
+          <div class="info-item"><div class="info-label">Motif</div><div class="info-value">${reason}</div></div>
+          <div class="info-item"><div class="info-label">Trajet</div><div class="info-value">${listing.origin} → ${listing.destination}</div></div>
         </div>
       </div>
 
-      <p style="font-size:14px;color:#6b7280">Votre paiement reste bloqué en escrow Stripe jusqu'à résolution du litige. En cas de litige reconnu fondé, le remboursement porte sur le prix du transport payé, conformément à nos <a href="${BASE_URL}/pages/legal.html" style="color:#6c63ff">CGU §8</a>.</p>
+      <p style="font-size:14px;color:#6b7280">Votre paiement reste bloqué en escrow jusqu'à résolution. En cas de litige fondé, le remboursement porte sur le prix du transport — voir nos <a href="${BASE_URL}/pages/legal.html" style="color:#6c63ff">CGU §8</a>.</p>
 
       <hr class="divider">
-      <div style="text-align:center">
-        <a href="${BASE_URL}/pages/dashboard-client.html" class="btn">Voir mon litige →</a>
-      </div>
+      <div style="text-align:center"><a href="${BASE_URL}/pages/dashboard-client.html" class="btn">Voir mon litige →</a></div>
     `
   });
 
-  // Email au transporteur
   const carrierHtml = wrapEmail({
-    title: 'Un litige a été ouvert — HapyLogistic',
-    previewText: `${client.firstName} a ouvert un litige concernant votre trajet ${listing.origin} → ${listing.destination}`,
+    title: 'Litige ouvert — HapyLogistic',
+    previewText: `Un litige a été ouvert sur votre trajet ${listing.origin} → ${listing.destination}`,
     body: `
       <h1>Litige ouvert 🔍</h1>
-      <p class="subtitle">Bonjour ${carrier.firstName}, un client a ouvert un litige concernant l'un de vos trajets.</p>
+      <p class="subtitle">Bonjour ${carrier.firstName}, un client a ouvert un litige sur l'un de vos trajets.</p>
 
       <div class="alert warning">
-        ⚠️ <strong>Action requise :</strong> Notre équipe va examiner la situation. Votre paiement pour ce trajet est temporairement suspendu jusqu'à résolution.
+        ⚠️ Votre paiement pour ce trajet est temporairement suspendu jusqu'à résolution.
       </div>
 
       <div class="section">
         <div class="section-title">📋 Détails</div>
         <div class="info-grid">
-          <div class="info-item">
-            <div class="info-label">Client</div>
-            <div class="info-value">${client.firstName} ${client.lastName}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Motif déclaré</div>
-            <div class="info-value">${reason}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">Trajet</div>
-            <div class="info-value">${listing.origin} → ${listing.destination}</div>
-          </div>
+          <div class="info-item"><div class="info-label">Client</div><div class="info-value">${client.firstName} ${client.lastName}</div></div>
+          <div class="info-item"><div class="info-label">Motif</div><div class="info-value">${reason}</div></div>
+          <div class="info-item"><div class="info-label">Trajet</div><div class="info-value">${listing.origin} → ${listing.destination}</div></div>
         </div>
       </div>
 
-      <p style="font-size:14px;color:#6b7280">Vous pouvez soumettre votre version des faits depuis votre tableau de bord. Notre équipe prend une décision sous 48h.</p>
+      <p style="font-size:14px;color:#6b7280">Soumettez votre version des faits depuis votre tableau de bord. Décision sous 48h.</p>
 
       <hr class="divider">
-      <div style="text-align:center">
-        <a href="${BASE_URL}/pages/dashboard-carrier.html" class="btn">Répondre au litige →</a>
-      </div>
+      <div style="text-align:center"><a href="${BASE_URL}/pages/dashboard-carrier.html" class="btn">Répondre au litige →</a></div>
     `
   });
 
-  // Email interne à l'équipe support
   const supportHtml = `
     <h2>Nouveau litige #${booking.id?.slice(0,8).toUpperCase()}</h2>
     <p><strong>Client :</strong> ${client.firstName} ${client.lastName} (${clientEmail})</p>
@@ -574,17 +444,15 @@ async function sendDisputeOpened({ clientEmail, carrierEmail, client, carrier, b
     <p><strong>Trajet :</strong> ${listing.origin} → ${listing.destination}</p>
     <p><strong>Motif :</strong> ${reason}</p>
     <p><strong>Booking ID :</strong> ${booking.id}</p>
-    <p><a href="https://dashboard.stripe.com">Voir dans Stripe Dashboard</a></p>
   `;
 
   await Promise.all([
-    resend.emails.send({ from: FROM_EMAIL, to: clientEmail, subject: `🔍 Litige ouvert #${booking.id?.slice(0,8).toUpperCase()}`, html: clientHtml }),
-    resend.emails.send({ from: FROM_EMAIL, to: carrierEmail, subject: `⚠️ Litige ouvert sur votre trajet ${listing.origin} → ${listing.destination}`, html: carrierHtml }),
+    resend.emails.send({ from: FROM_EMAIL, to: clientEmail, subject: `🔍 Litige #${booking.id?.slice(0,8).toUpperCase()}`, html: clientHtml }),
+    resend.emails.send({ from: FROM_EMAIL, to: carrierEmail, subject: `⚠️ Litige sur votre trajet ${listing.origin} → ${listing.destination}`, html: carrierHtml }),
     resend.emails.send({ from: FROM_EMAIL, to: SUPPORT_EMAIL, subject: `[LITIGE] #${booking.id?.slice(0,8).toUpperCase()} — ${client.firstName} vs ${carrier.firstName}`, html: supportHtml }),
   ]);
 }
 
-// ── Exports ───────────────────────────────────────────────────────────────────
 module.exports = {
   sendBookingConfirmation,
   sendNewBookingToCarrier,
