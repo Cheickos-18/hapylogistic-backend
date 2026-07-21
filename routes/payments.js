@@ -548,6 +548,9 @@ router.post('/dispute/:id', auth, async (req, res) => {
 });
 
 // ── GET /api/payments/bookings/received ──────────────────────
+// CONFIDENTIALITÉ RGPD : l'email du client n'est plus renvoyé au transporteur.
+// Toute communication doit passer par la messagerie interne HapyLogistic
+// conformément aux CGU §9 (anti-contournement).
 router.get('/bookings/received', auth, async (req, res) => {
   if (req.user.role !== 'carrier') {
     return res.status(403).json({ error: 'Réservé aux transporteurs' });
@@ -556,7 +559,7 @@ router.get('/bookings/received', auth, async (req, res) => {
     const [rows] = await db.execute(`
       SELECT b.*,
         l.origin, l.destination, l.departure_date,
-        u.first_name, u.last_name, u.email AS client_email
+        u.first_name, u.last_name
       FROM bookings b
       JOIN listings l ON b.listing_id = l.id
       JOIN users u ON u.id = b.client_id
