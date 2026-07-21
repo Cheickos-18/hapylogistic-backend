@@ -3,6 +3,7 @@ const express = require('express');
 const router  = express.Router();
 const db      = require('../config/database');
 const auth    = require('../middleware/auth');
+const { detectContactInfo, detectAbusiveLanguage } = require('../services/contentFilter');
 
 // ── GET /api/messages/unread/counts ──────────────────────────
 // Nombre de messages non lus, regroupés par réservation, pour
@@ -69,11 +70,29 @@ router.get('/:bookingId', auth, async (req, res) => {
 
 // ── POST /api/messages/:bookingId ────────────────────────────
 // Envoyer un message
+// MODÉRATION :
+//  - Coordonnées de contact (tél/email/réseaux sociaux) → message REFUSÉ (400).
+//    Voir services/contentFilter.js pour le détail des règles et leur logique.
+//  - Langage abusif/menaçant → message envoyé mais marqué is_flagged=1 pour
+//    revue humaine a posteriori (pas de blocage automatique, trop de faux
+//    positifs possibles sur ce type de détection).
 router.post('/:bookingId', auth, async (req, res) => {
   const { content } = req.body;
   if (!content || !content.trim()) {
     return res.status(400).json({ error: 'Message vide' });
   }
+
+  const trimmedContent = content.trim();
+
+  // ── Anti-contournement : bloque avant toute écriture en base ──────────────
+  const contactCheck = detectContactInfo(trimmedContent);
+  if (contactCheck.blocked) {
+    return res.status(400).json({
+      error: contactCheck.message,
+      code: 'CONTACT_INFO_BLOCKED',
+    });
+  }
+
   try {
     const [bookings] = await db.execute(
       'SELECT client_id, carrier_id FROM bookings WHERE id = ?',
@@ -89,10 +108,24 @@ router.post('/:bookingId', auth, async (req, res) => {
     // Le destinataire est l'autre partie
     const receiverId = req.user.id === b.client_id ? b.carrier_id : b.client_id;
 
+    // ── Modération : signalement (n'empêche pas l'envoi) ─────────────────────
+    const abuseCheck = detectAbusiveLanguage(trimmedContent);
+    if (abuseCheck.flagged) {
+      console.warn(
+        `[MODERATION] Message signalé — booking:${req.params.bookingId} sender:${req.user.id} reason:${abuseCheck.reason} terms:${abuseCheck.matchedCount}`
+      );
+    }
+
     const msgId = require('crypto').randomUUID();
     await db.execute(
-      'INSERT INTO messages (id, booking_id, sender_id, receiver_id, content) VALUES (?, ?, ?, ?, ?)',
-      [msgId, req.params.bookingId, req.user.id, receiverId, content.trim()]
+      `INSERT INTO messages
+        (id, booking_id, sender_id, receiver_id, content, is_flagged, flag_reason)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        msgId, req.params.bookingId, req.user.id, receiverId, trimmedContent,
+        abuseCheck.flagged ? 1 : 0,
+        abuseCheck.flagged ? abuseCheck.reason : null,
+      ]
     );
 
     // Créer une notification pour le destinataire
@@ -104,7 +137,7 @@ router.post('/:bookingId', auth, async (req, res) => {
     await db.execute(
       `INSERT INTO notifications (id, user_id, type, title, message)
        VALUES (?, ?, 'message', ?, ?)`,
-      [notifId, receiverId, `Nouveau message de ${senderName}`, content.trim().slice(0, 100)]
+      [notifId, receiverId, `Nouveau message de ${senderName}`, trimmedContent.slice(0, 100)]
     );
 
     res.status(201).json({
@@ -114,7 +147,7 @@ router.post('/:bookingId', auth, async (req, res) => {
         booking_id: req.params.bookingId,
         sender_id: req.user.id,
         receiver_id: receiverId,
-        content: content.trim(),
+        content: trimmedContent,
         is_read: 0,
         created_at: new Date().toISOString(),
         sender_name: senderName,
