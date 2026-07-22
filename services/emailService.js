@@ -453,6 +453,47 @@ async function sendDisputeOpened({ clientEmail, carrierEmail, client, carrier, b
   ]);
 }
 
+// ── 8. Avertissement de modération ────────────────────────────────────────────
+// Envoyé quand un admin CONFIRME (après revue humaine) qu'un message signalé
+// par le filtre automatique était réellement problématique — voir
+// routes/admin.js POST /flagged-messages/:id/resolve avec action='confirm'.
+// Reste volontairement factuel et neutre : pas de ton punitif excessif,
+// rappel des règles, invitation à les respecter à l'avenir.
+
+async function sendModerationWarning({ to, firstName, flagsCount }) {
+  const html = wrapEmail({
+    title: 'Avertissement — HapyLogistic',
+    previewText: `Un message que vous avez envoyé a été signalé et confirmé comme contraire à nos règles.`,
+    body: `
+      <h1>Avertissement ⚠️</h1>
+      <p class="subtitle">Bonjour ${firstName || ''}, un message que vous avez envoyé via la messagerie HapyLogistic a été examiné par notre équipe et jugé contraire à nos règles d'usage.</p>
+
+      <div class="alert warning">
+        ⚠️ <strong>Merci de garder un ton respectueux</strong> dans vos échanges avec les autres membres de la communauté HapyLogistic, quelle que soit la situation.
+      </div>
+
+      <div class="section">
+        <div class="section-title">📋 Ce qu'il faut savoir</div>
+        <p style="font-size:14px;color:#6b7280;line-height:1.6">
+          Cet avertissement est enregistré sur votre compte. Des signalements confirmés répétés peuvent entraîner
+          des mesures supplémentaires, pouvant aller jusqu'à la suspension de votre compte HapyLogistic.
+        </p>
+      </div>
+
+      <p style="font-size:14px;color:#6b7280">Si vous pensez qu'il s'agit d'une erreur, vous pouvez répondre à cet email pour contester cette décision.</p>
+
+      <hr class="divider">
+      <p style="font-size:13px;color:#9ca3af;text-align:center">Questions ? <a href="mailto:${SUPPORT_EMAIL}" style="color:#6c63ff">${SUPPORT_EMAIL}</a></p>
+    `
+  });
+
+  return resend.emails.send({
+    from: FROM_EMAIL, to,
+    subject: `⚠️ Avertissement — Message signalé sur HapyLogistic`,
+    html,
+  });
+}
+
 module.exports = {
   sendBookingConfirmation,
   sendNewBookingToCarrier,
@@ -461,4 +502,5 @@ module.exports = {
   sendReceiptConfirmed,
   sendRefundNotification,
   sendDisputeOpened,
+  sendModerationWarning,
 };
