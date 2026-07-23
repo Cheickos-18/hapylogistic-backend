@@ -3,6 +3,7 @@ const express  = require('express');
 const router   = express.Router();
 const bcrypt   = require('bcryptjs');
 const jwt      = require('jsonwebtoken');
+const crypto   = require('crypto');
 const db       = require('../config/database');
 const { stripe } = require('../services/stripe');
 const { Resend } = require('resend');
@@ -201,6 +202,37 @@ function emailWelcomeCarrier(firstName) {
   };
 }
 
+// ── Template email : réinitialisation de mot de passe ──────────
+function emailPasswordReset(firstName, resetUrl) {
+  return {
+    subject: '🔐 Réinitialisation de votre mot de passe — HapyLogistic',
+    html: `<!DOCTYPE html>
+<html lang="fr">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f4f6f9;font-family:'Segoe UI',Arial,sans-serif">
+  <div style="max-width:600px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.08)">
+    <div style="background:linear-gradient(135deg,#1a1aff,#4f46e5);padding:40px 32px;text-align:center">
+      <div style="font-size:32px;font-weight:900;color:#fff;letter-spacing:-1px">Hapy<span style="color:#ffd700">Logistic</span></div>
+    </div>
+    <div style="padding:40px 32px">
+      <h1 style="margin:0 0 12px;font-size:24px;color:#1a1a2e">Réinitialisation de mot de passe 🔐</h1>
+      <p style="color:#555;line-height:1.7;margin:0 0 24px">Bonjour ${firstName || ''}, vous avez demandé à réinitialiser votre mot de passe HapyLogistic. Cliquez sur le bouton ci-dessous pour choisir un nouveau mot de passe.</p>
+      <div style="text-align:center;margin:32px 0">
+        <a href="${resetUrl}" style="display:inline-block;background:linear-gradient(135deg,#1a1aff,#4f46e5);color:#fff;text-decoration:none;padding:14px 36px;border-radius:50px;font-weight:700;font-size:16px">
+          Réinitialiser mon mot de passe →
+        </a>
+      </div>
+      <p style="color:#888;font-size:13px;line-height:1.6">Ce lien expire dans <strong>1 heure</strong>. Si vous n'êtes pas à l'origine de cette demande, ignorez simplement cet email — votre mot de passe actuel reste inchangé.</p>
+    </div>
+    <div style="background:#f8f9ff;padding:24px 32px;text-align:center;border-top:1px solid #e8e8f0">
+      <p style="margin:0;color:#888;font-size:13px">Une question ? Répondez à cet email ou contactez <a href="mailto:contact@hapylogistic.com" style="color:#4f46e5">contact@hapylogistic.com</a></p>
+    </div>
+  </div>
+</body>
+</html>`
+  };
+}
+
 function generateToken(user) {
   return jwt.sign(
     { id: user.id, email: user.email, role: user.role },
@@ -359,6 +391,95 @@ router.post('/login', async (req, res) => {
     });
   } catch (err) {
     console.error('Erreur login:', err.message);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// ── POST /api/auth/forgot-password ───────────
+// Demande de réinitialisation de mot de passe. Génère un token à usage
+// unique, valable 1h, dont seul le hash SHA-256 est stocké en base.
+// IMPORTANT (anti-énumération) : la réponse est toujours la même,
+// que l'email existe en base ou non — pour ne jamais révéler à un
+// attaquant si une adresse email est enregistrée sur HapyLogistic.
+router.post('/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email requis' });
+
+  const genericResponse = {
+    success: true,
+    message: "Si un compte existe avec cet email, un lien de réinitialisation a été envoyé.",
+  };
+
+  try {
+    const [rows] = await db.execute('SELECT id, first_name, email FROM users WHERE email = ?', [email]);
+    if (!rows.length) {
+      return res.json(genericResponse); // même réponse, compte inexistant ou non
+    }
+    const user = rows[0];
+
+    const rawToken  = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const expires   = new Date(Date.now() + 60 * 60 * 1000); // 1h
+
+    await db.execute(
+      'UPDATE users SET reset_token_hash = ?, reset_token_expires = ? WHERE id = ?',
+      [tokenHash, expires, user.id]
+    );
+
+    const resetUrl = `${process.env.FRONTEND_URL}/pages/reset-password.html?token=${rawToken}`;
+
+    try {
+      const template = emailPasswordReset(user.first_name, resetUrl);
+      await resend.emails.send({
+        from: 'HapyLogistic <contact@hapylogistic.com>',
+        to:   user.email,
+        subject: template.subject,
+        html: template.html,
+      });
+    } catch (emailErr) {
+      // Ne jamais révéler l'échec d'envoi à l'appelant (toujours réponse générique)
+      console.error('[EMAIL] forgot-password send failed:', emailErr.message);
+    }
+
+    res.json(genericResponse);
+  } catch (err) {
+    console.error('Erreur forgot-password:', err.message);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// ── POST /api/auth/reset-password ────────────
+// Finalise la réinitialisation : vérifie le token (via son hash) et
+// son expiration, met à jour le mot de passe, invalide le token.
+router.post('/reset-password', async (req, res) => {
+  const { token, password } = req.body;
+  if (!token || !password) {
+    return res.status(400).json({ error: 'Token et nouveau mot de passe requis' });
+  }
+  if (password.length < 8) {
+    return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 8 caractères' });
+  }
+
+  try {
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const [rows] = await db.execute(
+      'SELECT id FROM users WHERE reset_token_hash = ? AND reset_token_expires > NOW()',
+      [tokenHash]
+    );
+    if (!rows.length) {
+      return res.status(400).json({ error: 'Ce lien de réinitialisation est invalide ou a expiré' });
+    }
+    const userId = rows[0].id;
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    await db.execute(
+      'UPDATE users SET password_hash = ?, reset_token_hash = NULL, reset_token_expires = NULL WHERE id = ?',
+      [passwordHash, userId]
+    );
+
+    res.json({ success: true, message: 'Mot de passe réinitialisé avec succès' });
+  } catch (err) {
+    console.error('Erreur reset-password:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
