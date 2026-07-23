@@ -29,13 +29,33 @@ async function refundListingBookings(listingId, reason) {
 }
 
 // ── Helper : normaliser pickupMode / pickupCities ────────────
+// IMPORTANT : la ville de départ (origin) est TOUJOURS incluse par défaut
+// dans les villes de collecte, en plus de celles ajoutées manuellement par
+// le transporteur. Un client au point de départ du trajet doit toujours
+// pouvoir y déposer/récupérer son colis, même si le transporteur n'a pensé
+// qu'à ajouter d'autres villes (ex: son domicile dans une ville voisine).
 function normalizePickup(pickupMode, pickupCities, fallbackOrigin) {
   const mode = pickupMode === 'collect' && Array.isArray(pickupCities) && pickupCities.length
     ? 'collect'
     : 'dropoff';
-  const cities = mode === 'collect'
-    ? pickupCities.map(c => String(c).trim()).filter(Boolean)
-    : [fallbackOrigin];
+
+  let cities;
+  if (mode === 'collect') {
+    const extra = pickupCities.map(c => String(c).trim()).filter(Boolean);
+    // Ville de départ en premier, puis les villes ajoutées manuellement,
+    // sans doublon (comparaison insensible à la casse/espaces superflus).
+    const seen = new Set();
+    cities = [fallbackOrigin, ...extra].filter(c => {
+      if (!c) return false;
+      const key = c.trim().toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  } else {
+    cities = [fallbackOrigin];
+  }
+
   return { mode, cities };
 }
 
