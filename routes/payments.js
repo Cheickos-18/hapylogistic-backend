@@ -26,6 +26,9 @@ router.post('/intent', auth, async (req, res) => {
   const specialNotes = instructions || notes || null;
 
   if (!listingId || !weightKg) return res.status(400).json({ error: 'listingId et weightKg requis' });
+  if (parseFloat(weightKg) <= 0 || isNaN(parseFloat(weightKg))) {
+    return res.status(400).json({ error: 'Le poids doit être supérieur à 0' });
+  }
 
   // ── Validation simple de la déclaration de valeur (champ informatif uniquement) ──
   const declaredValueNum = declaredValue !== undefined && declaredValue !== null
@@ -401,12 +404,24 @@ router.post('/confirm-receipt/:id', auth, async (req, res) => {
 });
 
 // ── POST /api/payments/capture/:id ───────────────────────────
+// ⚠️ SÉCURITÉ : cette route effectuait auparavant la capture du paiement
+// SANS AUCUNE vérification que l'appelant est bien le client concerné —
+// n'importe quel utilisateur authentifié pouvait forcer la libération du
+// paiement de N'IMPORTE QUELLE réservation livrée sur toute la plateforme,
+// court-circuitant la fenêtre de 48h de confirmation du client.
+// Cette route n'est appelée par aucune page du frontend (c'est
+// /confirm-receipt/:id qui fait ce travail correctement) — elle est
+// conservée par prudence (au cas où un usage externe en dépendrait) mais
+// protégée avec la même vérification que /confirm-receipt/:id.
 router.post('/capture/:id', auth, async (req, res) => {
   try {
     const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Réservation introuvable' });
     const booking = rows[0];
 
+    if (booking.client_id !== req.user.id) {
+      return res.status(403).json({ error: 'Réservé au client' });
+    }
     if (booking.status !== 'delivered') {
       return res.status(400).json({ error: 'La livraison doit être confirmée d\'abord' });
     }
@@ -438,8 +453,18 @@ router.post('/capture/:id', auth, async (req, res) => {
 // pas un assureur de marchandises — voir CGU §6 et §8. declared_value
 // servent uniquement de preuve de bonne foi lors de l'examen du litige, pas de base
 // de calcul du remboursement.
+//
+// ⚠️ SÉCURITÉ : cette route ne vérifiait auparavant AUCUN statut de la
+// réservation avant de rembourser — un client pouvait rembourser une
+// réservation déjà 'completed' (paiement déjà transféré au transporteur
+// depuis des semaines), risquant une récupération forcée des fonds côté
+// transporteur (solde négatif si déjà retiré). On limite maintenant le
+// remboundement en self-service aux statuts encore "en cours" ; toute
+// réservation déjà terminée doit passer par le processus de litige
+// (/api/payments/dispute/:id) qui implique une décision humaine.
 router.post('/refund/:id', auth, async (req, res) => {
   const { reason, amount } = req.body;
+  const REFUNDABLE_STATUSES = ['awaiting_payment', 'paid', 'in_transit'];
   try {
     const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Réservation introuvable' });
@@ -447,6 +472,11 @@ router.post('/refund/:id', auth, async (req, res) => {
 
     if (booking.client_id !== req.user.id) {
       return res.status(403).json({ error: 'Non autorisé' });
+    }
+    if (!REFUNDABLE_STATUSES.includes(booking.status)) {
+      return res.status(400).json({
+        error: `Cette réservation (statut "${booking.status}") ne peut plus être remboursée directement. Ouvrez un litige si besoin.`,
+      });
     }
 
     const pi = await stripe.paymentIntents.retrieve(booking.payment_intent_id);
@@ -508,12 +538,21 @@ router.post('/refund/:id', auth, async (req, res) => {
 });
 
 // ── POST /api/payments/dispute/:id ───────────────────────────
+// ⚠️ SÉCURITÉ : cette route ne vérifiait auparavant AUCUNE appartenance —
+// n'importe quel utilisateur authentifié pouvait ouvrir un litige sur
+// N'IMPORTE QUELLE réservation d'autrui, bloquant son paiement (statut
+// 'disputed') indéfiniment. Ajout de la vérification que l'appelant est
+// bien le client OU le transporteur concerné par cette réservation.
 router.post('/dispute/:id', auth, async (req, res) => {
   const { reason, description } = req.body;
   try {
     const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Réservation introuvable' });
     const booking = rows[0];
+
+    if (booking.client_id !== req.user.id && booking.carrier_id !== req.user.id) {
+      return res.status(403).json({ error: 'Non autorisé' });
+    }
 
     await db.execute('UPDATE bookings SET status = ? WHERE id = ?', ['disputed', booking.id]);
     const disputeId = require('crypto').randomUUID();
