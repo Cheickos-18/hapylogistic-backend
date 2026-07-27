@@ -250,6 +250,12 @@ router.post('/register', async (req, res) => {
   if (!firstName || !lastName || !email || !password || !role) {
     return res.status(400).json({ error: 'Champs obligatoires manquants' });
   }
+  // Même règle minimale que /reset-password — évite de créer des comptes
+  // avec un mot de passe trivial (ex: un seul caractère), ce qui n'était
+  // pas vérifié auparavant à l'inscription.
+  if (password.length < 8) {
+    return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 8 caractères' });
+  }
   if (!['client', 'carrier'].includes(role)) {
     return res.status(400).json({ error: 'Rôle invalide' });
   }
