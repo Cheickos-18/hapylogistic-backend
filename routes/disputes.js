@@ -112,8 +112,16 @@ router.get('/:id', auth, async (req, res) => {
 
 // ── POST /api/disputes/:id/respond ───────────────────────────
 // Transporteur ou client : ajouter un message au fil du litige
+//
+// SÉCURITÉ : le rôle affiché (client/transporteur) dans le fil de discussion
+// est TOUJOURS déduit de l'identité authentifiée (req.user.id comparé à
+// dispute.client_id / dispute.carrier_id) — jamais du corps de la requête.
+// Un ancien code acceptait un champ `role` envoyé par l'appelant, ce qui
+// permettait à un utilisateur de faire passer ses propres messages pour
+// ceux de l'autre partie (usurpation) dans un litige portant sur un
+// remboursement réel. Ce champ est désormais entièrement ignoré.
 router.post('/:id/respond', auth, async (req, res) => {
-  const { message, role } = req.body;
+  const { message } = req.body;
   if (!message || !message.trim()) {
     return res.status(400).json({ error: 'Message requis' });
   }
@@ -128,9 +136,8 @@ router.post('/:id/respond', auth, async (req, res) => {
       return res.status(403).json({ error: 'Non autorisé' });
     }
 
-    // Déterminer le rôle de l'expéditeur
-    const senderRole = role ||
-      (dispute.carrier_id === req.user.id ? 'carrier' : 'client');
+    // Rôle déduit UNIQUEMENT de l'identité authentifiée — non falsifiable.
+    const senderRole = dispute.carrier_id === req.user.id ? 'carrier' : 'client';
 
     // Parser l'historique existant (rétrocompatible avec l'ancien format texte)
     let history = [];
@@ -178,9 +185,6 @@ router.post('/:id/respond', auth, async (req, res) => {
   }
 });
 
-// ── POST /api/disputes/:id/resolve ───────────────────────────
-// Le client OU le transporteur marque le litige comme résolu de son côté.
-// Quand les DEUX parties ont marqué, le litige passe en status='resolved'.
 // ── POST /api/disputes/:id/resolve ───────────────────────────
 // Le client OU le transporteur propose une issue ('completed' = sans
 // remboursement / livraison confirmée, 'refunded' = avec remboursement).
