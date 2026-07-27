@@ -36,6 +36,49 @@ async function hasActiveBookings(userId) {
   return rows[0].cnt > 0;
 }
 
+// Anonymise le fil de discussion (resolution) des litiges impliquant userId.
+// `disputes.description` est déjà anonymisé séparément (étape 7 ci-dessous),
+// mais le fil de discussion (disputes.resolution, JSON contenant chaque message
+// échangé côté client et côté transporteur) contenait auparavant les propres
+// messages de l'utilisateur supprimé, toujours lisibles par l'autre partie.
+// On ne redacte QUE les messages envoyés par le rôle correspondant à
+// l'utilisateur qu'on supprime dans CE litige précis (client ou transporteur
+// selon le cas) — les messages 'system' (générés par l'application, pas des
+// données personnelles) et ceux de l'autre partie restent inchangés.
+async function anonymizeDisputeThreads(userId) {
+  const [disputeRows] = await db.execute(
+    'SELECT id, client_id, carrier_id, resolution FROM disputes WHERE client_id = ? OR carrier_id = ?',
+    [userId, userId]
+  );
+
+  for (const d of disputeRows) {
+    if (!d.resolution) continue;
+    const roleToRedact = d.client_id === userId ? 'client' : 'carrier';
+
+    let updatedResolution;
+    try {
+      const parsed = JSON.parse(d.resolution);
+      if (Array.isArray(parsed)) {
+        const redacted = parsed.map(entry =>
+          entry && entry.role === roleToRedact
+            ? { ...entry, text: '[Message supprimé — compte utilisateur effacé]' }
+            : entry
+        );
+        updatedResolution = JSON.stringify(redacted);
+      } else {
+        // Format JSON inattendu (non-array) : par prudence, on efface tout le champ.
+        updatedResolution = null;
+      }
+    } catch (e) {
+      // Ancien format texte brut (pré-JSON) : on ne peut pas isoler le rôle
+      // de façon fiable, donc on efface l'ensemble du champ par prudence.
+      updatedResolution = null;
+    }
+
+    await db.execute('UPDATE disputes SET resolution = ? WHERE id = ?', [updatedResolution, d.id]);
+  }
+}
+
 // ── POST /api/gdpr/delete-account ─────────────────────────────────────────────
 // Droit à l'effacement — art. 17 RGPD
 // Anonymise toutes les données personnelles identifiantes de l'utilisateur.
@@ -118,6 +161,11 @@ router.post('/delete-account', auth, async (req, res) => {
         description = '[Description supprimée — compte utilisateur effacé]'
       WHERE client_id = ? OR carrier_id = ?
     `, [userId, userId]);
+
+    // 7bis. Anonymiser le fil de discussion des litiges (voir helper ci-dessus) —
+    // couvre les messages échangés dans disputes.resolution, qui n'étaient
+    // auparavant pas nettoyés lors de la suppression du compte.
+    await anonymizeDisputeThreads(userId);
 
     // 8. Supprimer les notifications (pas de valeur comptable)
     await db.execute('DELETE FROM notifications WHERE user_id = ?', [userId]);
