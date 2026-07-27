@@ -49,13 +49,37 @@ async function recordStripeFeesForBooking(paymentIntentId) {
   }
 }
 
+// ── Vérification de signature avec plusieurs clés possibles ──────────────────
+// HapyLogistic a DEUX endpoints webhook Stripe pointant vers cette même URL :
+//   1. Un endpoint "Votre compte" (événements payment_intent.*, charge.dispute.*)
+//   2. Un endpoint "Comptes connectés" (événements account.updated des transporteurs)
+// Stripe attribue une clé secrète DIFFÉRENTE à chaque endpoint, mais les deux
+// pointent vers la même URL /api/webhooks/stripe. On essaie donc de vérifier
+// la signature avec chaque clé connue, dans l'ordre, jusqu'à ce qu'une
+// fonctionne. Si aucune ne correspond, la requête est rejetée normalement.
+function verifyStripeSignature(rawBody, signature) {
+  const secrets = [
+    process.env.STRIPE_WEBHOOK_SECRET,          // endpoint "Votre compte"
+    process.env.STRIPE_WEBHOOK_SECRET_CONNECT,  // endpoint "Comptes connectés"
+  ].filter(Boolean); // ignore les variables non définies
+
+  let lastError = null;
+  for (const secret of secrets) {
+    try {
+      return stripe.webhooks.constructEvent(rawBody, signature, secret);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new Error('Aucune clé secrète de webhook configurée');
+}
+
 router.post('/stripe', async (req, res) => {
-  const sig    = req.headers['stripe-signature'];
-  const secret = process.env.STRIPE_WEBHOOK_SECRET;
+  const sig = req.headers['stripe-signature'];
   let event;
 
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, secret);
+    event = verifyStripeSignature(req.body, sig);
   } catch (err) {
     console.error('Webhook signature invalide:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
