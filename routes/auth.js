@@ -233,6 +233,53 @@ function emailPasswordReset(firstName, resetUrl) {
   };
 }
 
+// ── Protection anti brute-force PAR COMPTE ────────────────────
+// Le rate limiter global (server.js) limite déjà les tentatives par IP,
+// mais un attaquant déterminé peut cibler un compte précis en changeant
+// d'IP à chaque poignée d'essais (proxy/VPN/botnet). Ce verrou complète
+// la protection en suivant les échecs par email, indépendamment de l'IP.
+//
+// Une Map en mémoire suffit ici : le serveur tourne en instance unique
+// (pas de cluster PM2 détecté). Limite : si tu passes un jour à plusieurs
+// instances derrière un load-balancer, remplace cette Map par une table
+// dédiée en base ou un stockage partagé (Redis) pour que le compteur soit
+// cohérent entre toutes les instances.
+const loginAttempts     = new Map(); // email (minuscules) -> { count, windowStart }
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_WINDOW_MS    = 15 * 60 * 1000; // 15 minutes
+
+function isLoginLocked(email) {
+  const entry = loginAttempts.get(email);
+  if (!entry) return false;
+  if (Date.now() - entry.windowStart > LOGIN_WINDOW_MS) {
+    loginAttempts.delete(email);
+    return false;
+  }
+  return entry.count >= LOGIN_MAX_ATTEMPTS;
+}
+
+function recordFailedLogin(email) {
+  const entry = loginAttempts.get(email);
+  if (!entry || Date.now() - entry.windowStart > LOGIN_WINDOW_MS) {
+    loginAttempts.set(email, { count: 1, windowStart: Date.now() });
+  } else {
+    entry.count += 1;
+  }
+}
+
+function clearLoginAttempts(email) {
+  loginAttempts.delete(email);
+}
+
+// Purge périodique pour éviter une croissance illimitée de la Map si un
+// attaquant essaie beaucoup d'emails différents sans jamais réussir.
+setInterval(() => {
+  const now = Date.now();
+  for (const [email, entry] of loginAttempts.entries()) {
+    if (now - entry.windowStart > LOGIN_WINDOW_MS) loginAttempts.delete(email);
+  }
+}, 30 * 60 * 1000).unref();
+
 function generateToken(user) {
   return jwt.sign(
     { id: user.id, email: user.email, role: user.role },
@@ -373,16 +420,27 @@ router.post('/login', async (req, res) => {
   if (!email || !password) {
     return res.status(400).json({ error: 'Email et mot de passe requis' });
   }
+  const normalizedEmail = String(email).trim().toLowerCase();
+
+  if (isLoginLocked(normalizedEmail)) {
+    return res.status(429).json({
+      error: 'Trop de tentatives échouées pour ce compte. Réessayez dans quelques minutes.',
+    });
+  }
+
   try {
     const [rows] = await db.execute('SELECT * FROM users WHERE email = ?', [email]);
     if (!rows.length) {
+      recordFailedLogin(normalizedEmail);
       return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
     }
     const user = rows[0];
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) {
+      recordFailedLogin(normalizedEmail);
       return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
     }
+    clearLoginAttempts(normalizedEmail);
     const token = generateToken(user);
     res.json({
       success: true,
