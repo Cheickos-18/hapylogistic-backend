@@ -22,6 +22,11 @@
     "resend": "^4.0.0",
     "uuid": "^11.1.1"
   },
+"overrides": {
+    "node-cron": {
+      "uuid": "^11.1.1"
+    }
+  },
   "devDependencies": {
     "nodemon": "^3.1.4"
   },
