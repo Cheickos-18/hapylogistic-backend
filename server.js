@@ -1,8 +1,8 @@
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  HapyLogistic — Serveur principal
 //  Node.js + Express + MySQL + Stripe Connect
 //  Optimisé pour Hostinger Business
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 require('dotenv').config();
 const express   = require('express');
 const cors      = require('cors');
@@ -16,7 +16,7 @@ const cleanOldBookings       = require('./cron/cleanOldBookings');
 const app  = express();
 const PORT = process.env.PORT || 3001;
 
-// ── Sécurité ──────────────────────────────────
+// ── Sécurité ─────────────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 
 // CORS — autorise le frontend Hostinger
@@ -47,20 +47,38 @@ app.use((req, res, next) => {
   next();
 });
 
-// Rate limiting
 app.set('trust proxy', 1);
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200 });
-const strict  = rateLimit({ windowMs: 60 * 1000, max: 20 });
+
+// ── Webhook Stripe : monté AVANT le rate limiter et AVANT express.json() ──
+// Deux raisons de le traiter à part, tout en haut du fichier :
+//  1. Stripe a besoin du corps brut (raw) non parsé pour vérifier la
+//     signature cryptographique de chaque événement.
+//  2. Ce endpoint est authentifié par cette signature, pas par une IP —
+//     lui appliquer un rate-limiting IP-based n'a pas de sens et pourrait
+//     faire perdre des événements si Stripe doit un jour rejouer un lot
+//     d'événements en retard (après une panne serveur par exemple) : les
+//     tentatives seraient bloquées en 429, Stripe finirait par abandonner
+//     les réessais, et l'événement (paiement, KYC...) serait perdu
+//     silencieusement. En le montant ici, avant app.use('/api/', limiter),
+//     la requête est entièrement traitée et la réponse envoyée avant même
+//     d'atteindre le rate limiter plus bas.
+app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }));
+app.use('/api/webhooks', require('./routes/webhooks'));
+
+// ── Rate limiting ────────────────────────────────────────────
+const limiter  = rateLimit({ windowMs: 15 * 60 * 1000, max: 200 }); // plancher par défaut, toute l'API
+const strict   = rateLimit({ windowMs: 60 * 1000, max: 20 });        // connexion, inscription, paiements
+const moderate = rateLimit({ windowMs: 60 * 1000, max: 60 });        // messagerie, litiges (anti-spam/harcèlement)
 app.use('/api/', limiter);
 app.use('/api/auth/', strict);
 app.use('/api/payments/', strict);
+app.use('/api/messages/', moderate);
+app.use('/api/disputes/', moderate);
 
-// ── IMPORTANT : webhook Stripe AVANT express.json() ──
-app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }));
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// ── Routes ────────────────────────────────────
+// ── Routes ───────────────────────────────────────────────────
 app.use('/api',          require('./routes/config'));
 app.use('/api/auth',     require('./routes/auth'));
 app.use('/api/listings', require('./routes/listings'));
@@ -68,11 +86,11 @@ app.use('/api/payments', require('./routes/payments'));
 app.use('/api/reviews',  require('./routes/reviews'));
 app.use('/api/disputes', require('./routes/disputes'));
 app.use('/api/messages', require('./routes/messages'));
-app.use('/api/webhooks', require('./routes/webhooks'));
 app.use('/api/gdpr',     require('./routes/gdpr'));
 app.use('/api/admin',    require('./routes/admin'));
+// Note : /api/webhooks est déjà monté plus haut, avant le rate limiter.
 
-// ── Health check ──────────────────────────────
+// ── Health check ─────────────────────────────────────────────
 app.get('/health', (req, res) => {
   res.json({
     status:  'ok',
@@ -83,7 +101,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-// ── Infos API (racine) ────────────────────────
+// ── Infos API (racine) ───────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
     name:    'HapyLogistic API',
@@ -115,18 +133,18 @@ app.get('/', (req, res) => {
   });
 });
 
-// ── 404 ───────────────────────────────────────
+// ── 404 ──────────────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({ error: 'Route introuvable' });
 });
 
-// ── Erreur globale ────────────────────────────
+// ── Erreur globale ───────────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('Erreur:', err.message);
   res.status(500).json({ error: 'Erreur serveur interne' });
 });
 
-// ── Démarrage ─────────────────────────────────
+// ── Démarrage ────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════════╗
