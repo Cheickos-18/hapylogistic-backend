@@ -173,6 +173,73 @@ router.get('/bookings/:id/pickup-code', auth, async (req, res) => {
   }
 });
 
+// ── POST /api/payments/verify-content/:id ─────────────────────
+// NOUVEAU — Étape de vérification du contenu par le transporteur, AVANT
+// la saisie du code de collecte à 4 chiffres.
+//
+// Cadrage volontaire (cohérent avec la position "plateforme de mise en
+// relation" défendue auprès de la CCI, à reconfirmer avec le conseiller) :
+// c'est le TRANSPORTEUR qui vérifie, pour sa propre protection, que le
+// contenu remis correspond à la déclaration du client — HapyLogistic ne
+// contrôle ni n'inspecte lui-même le colis. Le rôle de la plateforme se
+// limite à enregistrer la confirmation du transporteur et à conditionner
+// la suite du parcours (code de collecte) à cette confirmation.
+//
+// Conforme aux CGU §6.p4 (charge de la preuve / preuves photographiques
+// à la collecte) déjà en vigueur — aucune modification des CGU nécessaire
+// pour cette fonctionnalité.
+router.post('/verify-content/:id', auth, async (req, res) => {
+  const { matches, notes } = req.body;
+  if (typeof matches !== 'boolean') {
+    return res.status(400).json({ error: 'Le champ "matches" (true/false) est requis' });
+  }
+
+  try {
+    const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Réservation introuvable' });
+    const booking = rows[0];
+
+    if (booking.carrier_id !== req.user.id) {
+      return res.status(403).json({ error: 'Réservé au transporteur de cette réservation' });
+    }
+    if (booking.status !== 'paid') {
+      return res.status(400).json({
+        error: booking.status === 'awaiting_payment'
+          ? 'Le paiement du client doit être confirmé avant de vérifier le contenu.'
+          : `Impossible de vérifier le contenu pour une réservation en statut "${booking.status}".`,
+      });
+    }
+
+    if (matches) {
+      await db.execute(
+        'UPDATE bookings SET content_verified = 1, content_verified_at = NOW(), content_verified_notes = ? WHERE id = ?',
+        [notes || null, booking.id]
+      );
+      return res.json({
+        success: true,
+        contentVerified: true,
+        message: 'Contenu vérifié — vous pouvez maintenant saisir le code de collecte.',
+      });
+    }
+
+    // Le transporteur signale une non-conformité : on n'active PAS content_verified,
+    // et on n'annule pas automatiquement — la décision (annuler / contacter le client)
+    // reste au transporteur, via les actions déjà existantes (message, annulation).
+    await db.execute(
+      'UPDATE bookings SET content_verified = 0, content_verified_notes = ? WHERE id = ?',
+      [notes || 'Non-conformité signalée par le transporteur', booking.id]
+    );
+    res.json({
+      success: true,
+      contentVerified: false,
+      message: "Non-conformité enregistrée. Vous pouvez contacter le client via la messagerie, ou annuler la réservation si le contenu ne correspond pas à la déclaration.",
+    });
+  } catch (err) {
+    console.error('Erreur verify-content:', err.message);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
 // ── POST /api/payments/confirm-pickup/:id ────────────────────
 router.post('/confirm-pickup/:id', auth, async (req, res) => {
   const { code } = req.body;
@@ -188,6 +255,13 @@ router.post('/confirm-pickup/:id', auth, async (req, res) => {
     }
     if (booking.status !== 'paid') {
       return res.status(400).json({ error: 'La réservation doit être en statut payé' });
+    }
+    // ── NOUVEAU : la vérification du contenu doit être faite avant la collecte ──
+    if (!booking.content_verified) {
+      return res.status(400).json({
+        error: 'Veuillez d\'abord vérifier que le contenu du colis correspond à la déclaration avant de confirmer la collecte.',
+        code: 'CONTENT_NOT_VERIFIED',
+      });
     }
     if (booking.pickup_code !== String(code).trim()) {
       return res.status(400).json({ error: 'Code incorrect — vérifiez avec le client' });
