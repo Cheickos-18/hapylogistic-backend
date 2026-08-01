@@ -216,7 +216,10 @@ router.post('/', auth, async (req, res) => {
 // ── PATCH /api/listings/:id ──────────────────
 router.patch('/:id', auth, async (req, res) => {
   // CORRECTION : countryFrom et countryTo ajoutés pour ne pas perdre les drapeaux lors d'une modification
-  const { origin, destination, countryFrom, countryTo, departureDate, type, availableKg, pricePerKg, description, status, pickupMode, pickupCities } = req.body;
+  // CORRECTION : zone ajoutée pour que le sélecteur "Région de destination" du
+  // formulaire d'édition soit bien persisté (avant, seule la création (POST)
+  // prenait zone en compte — l'édition la laissait toujours à 'af' par défaut).
+  const { origin, destination, countryFrom, countryTo, departureDate, type, zone, availableKg, pricePerKg, description, status, pickupMode, pickupCities } = req.body;
   try {
     const [rows] = await db.execute(
       'SELECT * FROM listings WHERE id = ? AND carrier_id = ?',
@@ -244,6 +247,7 @@ router.patch('/:id', auth, async (req, res) => {
     if (countryTo     !== undefined) { updates.push('country_to = ?');    params.push(countryTo   || null); }
     if (departureDate !== undefined) { updates.push('departure_date = ?');params.push(departureDate); }
     if (type          !== undefined) { updates.push('type = ?');          params.push(type); }
+    if (zone          !== undefined) { updates.push('zone = ?');          params.push(zone); }
     if (availableKg   !== undefined) { updates.push('available_kg = ?');  params.push(parseFloat(availableKg)); }
     if (pricePerKg    !== undefined) { updates.push('price_per_kg = ?');  params.push(parseFloat(pricePerKg)); }
     if (description   !== undefined) { updates.push('description = ?');   params.push(description); }
