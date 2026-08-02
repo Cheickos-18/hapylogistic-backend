@@ -26,6 +26,21 @@ function currentYear() {
   return new Date().getFullYear();
 }
 
+// ── Helper : échapper le HTML dans du texte libre saisi par un utilisateur ──
+// Nécessaire pour tout champ texte libre (ex: "notes" ci-dessous, saisi par
+// le transporteur) inséré tel quel dans un corps HTML d'email — sans
+// échappement, du HTML/JS injecté dans ce champ s'afficherait ou pourrait
+// s'exécuter dans certains clients mail.
+function escapeHtml(s) {
+  if (!s) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function wrapEmail({ title, previewText, body }) {
   return `<!DOCTYPE html>
 <html lang="fr">
@@ -191,7 +206,7 @@ async function sendNewBookingToCarrier({ to, carrierFirstName, booking, listing,
       <div class="section">
         <div class="section-title">📝 Description du colis</div>
         <div class="info-item">
-          <div class="info-value" style="font-weight:400;font-size:14px;line-height:1.6">${booking.special_notes}</div>
+          <div class="info-value" style="font-weight:400;font-size:14px;line-height:1.6">${escapeHtml(booking.special_notes)}</div>
         </div>
       </div>` : ''}
 
@@ -494,6 +509,66 @@ async function sendModerationWarning({ to, firstName, flagsCount }) {
   });
 }
 
+// ── 9. Non-conformité de contenu signalée par le transporteur ────────────────
+// Envoyé au client dès que le transporteur signale, avant collecte, que le
+// contenu du colis ne correspond pas à sa déclaration — voir
+// routes/payments.js POST /verify-content/:id. Le code de retour n'est
+// JAMAIS inclus ici : il n'est communiqué qu'oralement par le transporteur
+// au moment de rendre le colis, et saisi ensuite par le client sur son
+// tableau de bord (POST /confirm-return/:id).
+
+async function sendContentMismatchNotification({ to, firstName, booking, listing, notes }) {
+  const weight = booking.weight_kg ?? booking.weight;
+
+  const html = wrapEmail({
+    title: 'Non-conformité signalée par le transporteur — HapyLogistic',
+    previewText: `Le transporteur signale un problème avec votre colis pour ${listing.origin} → ${listing.destination}`,
+    body: `
+      <h1>Le transporteur a signalé un problème 📦</h1>
+      <p class="subtitle">Bonjour ${firstName}, avant de collecter votre colis, le transporteur a signalé que son contenu ne correspond pas à ce que vous aviez déclaré à la réservation.</p>
+
+      <div class="alert warning">
+        ⚠️ <strong>Votre colis n'a pas été pris en charge.</strong> Il reste chez le transporteur pour le moment — aucun transport n'a commencé.
+      </div>
+
+      ${notes ? `
+      <div class="section">
+        <div class="section-title">📝 Ce que le transporteur a signalé</div>
+        <div class="info-item">
+          <div class="info-value" style="font-weight:400;font-size:14px;line-height:1.6">${escapeHtml(notes)}</div>
+        </div>
+      </div>` : ''}
+
+      <div class="section">
+        <div class="section-title">📦 Votre envoi</div>
+        <div class="info-grid">
+          <div class="info-item"><div class="info-label">Trajet</div><div class="info-value">${listing.origin} → ${listing.destination}</div></div>
+          <div class="info-item"><div class="info-label">Poids déclaré</div><div class="info-value">${weight} kg</div></div>
+        </div>
+      </div>
+
+      <div class="alert">
+        <strong>Comment récupérer votre colis :</strong> contactez le transporteur via la messagerie intégrée à votre tableau de bord pour convenir d'un lieu et d'un moment. Lorsqu'il vous remet votre colis, il vous communiquera oralement un code à 4 chiffres. Saisissez ce code sur votre tableau de bord : la réservation sera automatiquement annulée et vous serez remboursé intégralement.
+      </div>
+
+      <div class="alert warning">
+        ⏳ <strong>Vous n'avez aucune démarche à faire dans l'urgence :</strong> si vous n'avez pas confirmé la récupération de votre colis sous 48 heures, un remboursement intégral automatique sera déclenché et un litige sera ouvert par notre équipe.
+      </div>
+
+      <hr class="divider">
+      <div style="text-align:center">
+        <a href="${BASE_URL}/pages/dashboard-client.html" class="btn">Voir ma réservation →</a>
+      </div>
+    `
+  });
+
+  return resend.emails.send({
+    from: FROM_EMAIL, to,
+    subject: `⚠️ Non-conformité signalée — ${listing.origin} → ${listing.destination}`,
+    html,
+  });
+}
+
 module.exports = {
   sendBookingConfirmation,
   sendNewBookingToCarrier,
@@ -503,4 +578,5 @@ module.exports = {
   sendRefundNotification,
   sendDisputeOpened,
   sendModerationWarning,
+  sendContentMismatchNotification,
 };
