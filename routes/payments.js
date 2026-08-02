@@ -12,7 +12,7 @@ const email   = require('../services/emailService');
 // transport payé (client_total) peut être remboursé — voir CGU §6 et §8.
 // Aucune preuve n'est exigée à la réservation.
 
-// ── Générer un code de collecte à 4 chiffres ─────────────────
+// ── Générer un code à 4 chiffres (collecte ET retour) ────────
 function generatePickupCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
 }
@@ -174,7 +174,7 @@ router.get('/bookings/:id/pickup-code', auth, async (req, res) => {
 });
 
 // ── POST /api/payments/verify-content/:id ─────────────────────
-// NOUVEAU — Étape de vérification du contenu par le transporteur, AVANT
+// Étape de vérification du contenu par le transporteur, AVANT
 // la saisie du code de collecte à 4 chiffres.
 //
 // Cadrage volontaire (cohérent avec la position "plateforme de mise en
@@ -188,6 +188,22 @@ router.get('/bookings/:id/pickup-code', auth, async (req, res) => {
 // Conforme aux CGU §6.p4 (charge de la preuve / preuves photographiques
 // à la collecte) déjà en vigueur — aucune modification des CGU nécessaire
 // pour cette fonctionnalité.
+//
+// MISE À JOUR — Non-conformité signalée (matches: false) :
+// 1) Un email est désormais envoyé immédiatement au client pour l'informer
+//    (auparavant, il ne l'apprenait que si le transporteur le contactait
+//    lui-même ou annulait la réservation).
+// 2) Un "code de retour" à 4 chiffres est généré, connu du seul transporteur
+//    (affiché sur son tableau de bord — jamais envoyé au client par email,
+//    exactement comme le code de collecte n'est connu que du client). Le
+//    transporteur le communique oralement au client au moment où il lui
+//    rend physiquement le colis. Le client saisit ensuite ce code sur son
+//    propre tableau de bord (POST /confirm-return/:id) pour confirmer avoir
+//    récupéré son colis — ce qui déclenche automatiquement l'annulation et
+//    le remboursement intégral. Cette symétrie avec le code de collecte
+//    garantit que le remboursement ne peut être déclenché que par quelqu'un
+//    qui a physiquement rencontré le transporteur, pas juste en cliquant
+//    dans l'app.
 router.post('/verify-content/:id', auth, async (req, res) => {
   const { matches, notes } = req.body;
   if (typeof matches !== 'boolean') {
@@ -211,8 +227,11 @@ router.post('/verify-content/:id', auth, async (req, res) => {
     }
 
     if (matches) {
+      // Le transporteur confirme après tout (ex: suite à un précédent signalement
+      // de non-conformité) — on efface un éventuel code de retour resté en attente
+      // pour qu'il ne puisse plus être utilisé par erreur.
       await db.execute(
-        'UPDATE bookings SET content_verified = 1, content_verified_at = NOW(), content_verified_notes = ? WHERE id = ?',
+        'UPDATE bookings SET content_verified = 1, content_verified_at = NOW(), content_verified_notes = ?, return_code = NULL WHERE id = ?',
         [notes || null, booking.id]
       );
       return res.json({
@@ -223,20 +242,118 @@ router.post('/verify-content/:id', auth, async (req, res) => {
     }
 
     // Le transporteur signale une non-conformité : on n'active PAS content_verified,
-    // et on n'annule pas automatiquement — la décision (annuler / contacter le client)
-    // reste au transporteur, via les actions déjà existantes (message, annulation).
+    // et on n'annule pas automatiquement la réservation — mais on informe le client
+    // immédiatement et on prépare le mécanisme de retour du colis.
+    const returnCode = generatePickupCode();
     await db.execute(
-      'UPDATE bookings SET content_verified = 0, content_verified_notes = ? WHERE id = ?',
-      [notes || 'Non-conformité signalée par le transporteur', booking.id]
+      'UPDATE bookings SET content_verified = 0, content_verified_notes = ?, return_code = ?, return_code_generated_at = NOW() WHERE id = ?',
+      [notes || 'Non-conformité signalée par le transporteur', returnCode, booking.id]
     );
+
+    try {
+      const [listings]   = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
+      const [clientRows] = await db.execute('SELECT * FROM users WHERE id = ?', [booking.client_id]);
+      if (listings.length && clientRows.length) {
+        // ⚠️ Fonction à ajouter dans services/emailService.js si elle n'existe
+        // pas encore — voir la spécification donnée séparément.
+        await email.sendContentMismatchNotification({
+          to:        clientRows[0].email,
+          firstName: clientRows[0].first_name,
+          booking,
+          listing:   listings[0],
+          notes:     notes || null,
+        });
+      }
+    } catch (emailErr) {
+      console.error('[EMAIL] sendContentMismatchNotification failed:', emailErr.message);
+    }
+
     res.json({
       success: true,
       contentVerified: false,
-      message: "Non-conformité enregistrée. Vous pouvez contacter le client via la messagerie, ou annuler la réservation si le contenu ne correspond pas à la déclaration.",
+      message: "Non-conformité enregistrée et client notifié par email. Donnez-lui le code de retour affiché ci-dessous lorsque vous lui rendez son colis — sa saisie du code annulera automatiquement la réservation avec remboursement intégral. Si aucune confirmation n'intervient sous 48h, la réservation sera remboursée automatiquement et un litige sera ouvert pour examen.",
     });
   } catch (err) {
     console.error('Erreur verify-content:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// ── POST /api/payments/confirm-return/:id ─────────────────────
+// NOUVEAU — Le CLIENT confirme avoir récupéré son colis auprès du
+// transporteur suite à une non-conformité signalée (voir verify-content
+// ci-dessus). Le code n'est connu que du transporteur ; sa saisie par le
+// client prouve que la rencontre physique a bien eu lieu. Déclenche
+// automatiquement l'annulation de la réservation et le remboursement
+// intégral du client — même logique que /carrier-cancel/:id.
+router.post('/confirm-return/:id', auth, async (req, res) => {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: 'Code requis' });
+
+  try {
+    const [rows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Réservation introuvable' });
+    const booking = rows[0];
+
+    if (booking.client_id !== req.user.id) {
+      return res.status(403).json({ error: 'Réservé au client de cette réservation' });
+    }
+    if (booking.status !== 'paid') {
+      return res.status(400).json({ error: `Impossible de confirmer un retour pour une réservation en statut "${booking.status}".` });
+    }
+    if (!booking.return_code) {
+      return res.status(400).json({ error: "Aucun retour de colis n'est en attente pour cette réservation." });
+    }
+    if (booking.return_code !== String(code).trim()) {
+      return res.status(400).json({ error: 'Code incorrect — vérifiez avec le transporteur' });
+    }
+
+    // Annuler ou rembourser via Stripe (même logique que /carrier-cancel/:id)
+    const pi = await stripe.paymentIntents.retrieve(booking.payment_intent_id);
+    if (pi.status === 'requires_capture') {
+      await stripe.paymentIntents.cancel(booking.payment_intent_id);
+    } else if (pi.status === 'succeeded') {
+      await stripe.refunds.create({
+        payment_intent: booking.payment_intent_id,
+        reason: 'requested_by_customer',
+      });
+    } else if (!['canceled', 'requires_payment_method'].includes(pi.status)) {
+      return res.status(400).json({ error: `Impossible d'annuler un paiement en statut: ${pi.status}` });
+    }
+
+    await db.execute(
+      'UPDATE bookings SET status = ?, return_confirmed_at = NOW() WHERE id = ?',
+      ['refunded', booking.id]
+    );
+    await db.execute(
+      'UPDATE listings SET available_kg = available_kg + ?, status = ? WHERE id = ?',
+      [parseFloat(booking.weight_kg), 'active', booking.listing_id]
+    );
+
+    try {
+      const [listings]   = await db.execute('SELECT * FROM listings WHERE id = ?', [booking.listing_id]);
+      const [clientRows] = await db.execute('SELECT * FROM users WHERE id = ?', [booking.client_id]);
+      if (listings.length && clientRows.length) {
+        await email.sendRefundNotification({
+          to:           clientRows[0].email,
+          firstName:    clientRows[0].first_name,
+          booking,
+          listing:      listings[0],
+          refundAmount: parseFloat(booking.client_total),
+          reason:       'Colis non conforme retourné et confirmé par vos soins. Remboursement intégral.',
+        });
+      }
+    } catch (emailErr) {
+      console.error('[EMAIL] confirm-return notification failed:', emailErr.message);
+    }
+
+    res.json({
+      success: true,
+      message: 'Retour confirmé — réservation annulée, remboursement intégral en cours.',
+    });
+  } catch (err) {
+    console.error('Erreur confirm-return:', err.message);
+    res.status(500).json({ error: 'Erreur lors de la confirmation du retour' });
   }
 });
 
@@ -701,7 +818,24 @@ router.get('/bookings/me', auth, async (req, res) => {
       WHERE b.${field} = ?
       ORDER BY b.created_at DESC
     `, [req.user.id]);
-    res.json({ bookings: rows });
+
+    // ── SÉCURITÉ : le code de retour ne doit être connu QUE du transporteur —
+    // il sert à prouver que le client l'a bien rencontré physiquement pour
+    // récupérer son colis. Le renvoyer au client dans cette réponse (b.* le
+    // ferait sinon, sans distinction de rôle) permettrait de le lire
+    // directement dans l'API sans jamais rencontrer le transporteur,
+    // annulant l'intérêt du mécanisme. On l'omet donc côté client, et on
+    // n'expose que le fait qu'un retour est en attente (booléen).
+    const bookings = rows.map(r => {
+      const returnPending = !!r.return_code;
+      if (field === 'client_id') {
+        const { return_code, ...rest } = r;
+        return { ...rest, return_pending: returnPending };
+      }
+      return { ...r, return_pending: returnPending };
+    });
+
+    res.json({ bookings });
   } catch (err) {
     console.error('Erreur bookings/me:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });
