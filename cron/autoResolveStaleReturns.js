@@ -46,8 +46,8 @@ async function autoResolveStaleReturns() {
           VALUES (?, ?, ?, ?, ?, ?, ?)
         `, [
           disputeId, booking.id, booking.client_id, booking.carrier_id,
-          'non_conformite_non_resolue',
-          `Non-conformité de contenu signalée par le transporteur, jamais confirmée par le client après ${RETURN_EXPIRY_HOURS}h (code de retour non transmis ou colis non restitué). Remboursement automatique déjà effectué. Dossier à examiner en priorité.`,
+          'other',
+          `[ESCALADE AUTOMATIQUE — non-conformité non résolue] Non-conformité de contenu signalée par le transporteur, jamais confirmée par le client après ${RETURN_EXPIRY_HOURS}h (code de retour non transmis ou colis non restitué). Remboursement automatique déjà effectué. Dossier à examiner en priorité.`,
           booking.payment_intent_id,
         ]);
 
