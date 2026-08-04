@@ -22,6 +22,21 @@ function normalizePhone(phone) {
   return p;
 }
 
+// ── Normalisation email (trim + minuscules) ─────────────────────
+// CORRECTION : avant, seule la route /login normalisait l'email pour son
+// verrou anti brute-force (Map), mais interrogeait quand même la base avec
+// la valeur BRUTE (non normalisée) — de même pour /register (vérification
+// d'unicité) et /forgot-password. Deux comptes différant seulement par la
+// casse ("Test@X.com" vs "test@x.com") pouvaient donc potentiellement être
+// créés séparément, et un utilisateur tapant son email avec une casse
+// différente de celle enregistrée pouvait se voir refuser une connexion
+// pourtant valide (selon la collation exacte de la colonne en base — un
+// comportement qu'il ne faut pas laisser reposer sur un réglage MySQL
+// implicite). Email normalisé une seule fois, utilisé partout ensuite.
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
+
 // ── Templates email ──────────────────────────────────────────
 function emailWelcomeClient(firstName) {
   return {
@@ -178,9 +193,10 @@ function emailWelcomeCarrier(firstName) {
       <div style="background:#fffbeb;border:2px solid #fcd34d;border-radius:12px;padding:20px;margin-bottom:24px">
         <div style="font-weight:700;color:#1a1a2e;margin-bottom:12px">🏆 Système de niveaux</div>
         <div style="font-size:13px;color:#666;line-height:1.8">
-          🥉 <strong>Bronze</strong> — Débutant (0-4 trajets)<br>
-          🥈 <strong>Argent</strong> — Confirmé (5-19 trajets, note ≥ 4.0)<br>
-          🥇 <strong>Or</strong> — Expert (20+ trajets, note ≥ 4.5)<br>
+          🥉 <strong>Bronze</strong> — Débutant (0-9 trajets)<br>
+          🥈 <strong>Argent</strong> — Confirmé (10-29 trajets)<br>
+          🥇 <strong>Or</strong> — Expert (30-99 trajets)<br>
+          💎 <strong>Platine</strong> — Elite (100+ trajets)<br>
           <span style="color:#888;font-size:12px;margin-top:4px;display:block">Les niveaux supérieurs augmentent votre visibilité dans les recherches.</span>
         </div>
       </div>
@@ -290,9 +306,12 @@ function generateToken(user) {
 
 // ── POST /api/auth/register ──────────────────
 router.post('/register', async (req, res) => {
-  const { firstName, lastName, email, password, role, country, carrierType, destination, carrierAccountType, companyName } = req.body;
+  const { firstName, lastName, password, role, country, carrierType, destination, carrierAccountType, companyName } = req.body;
   // Normaliser le téléphone en E.164 dès la réception
   const phone = normalizePhone(req.body.phone);
+  // CORRECTION : email normalisé une seule fois, utilisé pour toute la route
+  // (vérification d'unicité, Stripe, stockage) — voir normalizeEmail() plus haut.
+  const email = normalizeEmail(req.body.email);
 
   if (!firstName || !lastName || !email || !password || !role) {
     return res.status(400).json({ error: 'Champs obligatoires manquants' });
@@ -416,11 +435,15 @@ router.post('/register', async (req, res) => {
 
 // ── POST /api/auth/login ─────────────────────
 router.post('/login', async (req, res) => {
-  const { email, password } = req.body;
+  const { password } = req.body;
+  const email = req.body.email;
   if (!email || !password) {
     return res.status(400).json({ error: 'Email et mot de passe requis' });
   }
-  const normalizedEmail = String(email).trim().toLowerCase();
+  // CORRECTION : cette variable normalisée servait déjà au verrou anti
+  // brute-force, mais PAS à la requête base de données juste après (qui
+  // utilisait la valeur brute `email`) — désormais utilisée partout.
+  const normalizedEmail = normalizeEmail(email);
 
   if (isLoginLocked(normalizedEmail)) {
     return res.status(429).json({
@@ -429,7 +452,7 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    const [rows] = await db.execute('SELECT * FROM users WHERE email = ?', [email]);
+    const [rows] = await db.execute('SELECT * FROM users WHERE email = ?', [normalizedEmail]);
     if (!rows.length) {
       recordFailedLogin(normalizedEmail);
       return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
@@ -466,7 +489,7 @@ router.post('/login', async (req, res) => {
 // que l'email existe en base ou non — pour ne jamais révéler à un
 // attaquant si une adresse email est enregistrée sur HapyLogistic.
 router.post('/forgot-password', async (req, res) => {
-  const { email } = req.body;
+  const email = normalizeEmail(req.body.email); // CORRECTION : même normalisation qu'ailleurs
   if (!email) return res.status(400).json({ error: 'Email requis' });
 
   const genericResponse = {
@@ -595,6 +618,13 @@ router.get('/me', require('../middleware/auth'), async (req, res) => {
       stripeDetailsSubmitted,
     });
   } catch (err) {
+    // CORRECTION : ce catch était totalement silencieux (aucun log) —
+    // seul fichier de tout le backend où une erreur pouvait disparaître
+    // sans laisser de trace. GET /me est appelé à chaque chargement de
+    // page connectée : une panne ici (base de données inaccessible, etc.)
+    // aurait affecté énormément d'utilisateurs sans jamais apparaître
+    // dans les logs.
+    console.error('Erreur /auth/me:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
