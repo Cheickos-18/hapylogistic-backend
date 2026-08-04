@@ -569,6 +569,35 @@ async function sendContentMismatchNotification({ to, firstName, booking, listing
   });
 }
 
+// ── 10. Alerte chargeback Stripe (interne, équipe support) ───────────────────
+// Un "chargeback" est une contestation initiée directement auprès de la
+// banque du client (pas via le système de litige interne HapyLogistic) —
+// événement le plus urgent du système de paiement : les réseaux de cartes
+// imposent un délai de réponse strict, et si le transporteur a déjà été payé
+// au moment du chargeback, HapyLogistic perd réellement l'argent (le
+// transfert Stripe Connect vers le transporteur n'est pas automatiquement
+// récupéré). Voir routes/webhooks.js — case 'charge.dispute.created'.
+async function sendChargebackAlert({ bookingId, bookingStatusBeforeChargeback, paymentIntentId, stripeDisputeId, amount, reason }) {
+  const alreadyPaidOut = ['completed'].includes(bookingStatusBeforeChargeback);
+  const html = `
+    <h2 style="color:#e53e3e">🚨 Chargeback Stripe détecté${alreadyPaidOut ? ' — TRANSPORTEUR DÉJÀ PAYÉ' : ''}</h2>
+    <p><strong>Booking ID :</strong> ${bookingId || 'introuvable en base'}</p>
+    <p><strong>Statut de la réservation avant le chargeback :</strong> ${bookingStatusBeforeChargeback || 'inconnu'}</p>
+    <p><strong>Payment Intent Stripe :</strong> ${paymentIntentId}</p>
+    <p><strong>Dispute Stripe ID :</strong> ${stripeDisputeId}</p>
+    <p><strong>Montant contesté :</strong> ${formatCurrency(amount)}</p>
+    <p><strong>Motif indiqué par la banque :</strong> ${reason || 'non précisé'}</p>
+    ${alreadyPaidOut ? '<p style="color:#e53e3e;font-weight:700">⚠️ Le transporteur avait déjà été payé au moment du chargeback — vérifier en priorité si les fonds peuvent être récupérés.</p>' : ''}
+    <p>Une réponse doit être soumise dans le délai imparti par Stripe (généralement 7 à 21 jours selon le réseau de carte). Consultez le dashboard Stripe → Litiges pour fournir les preuves (confirmation de livraison, échanges de messages, etc.).</p>
+  `;
+  return resend.emails.send({
+    from: FROM_EMAIL,
+    to: SUPPORT_EMAIL,
+    subject: `🚨 [URGENT] Chargeback Stripe ${formatCurrency(amount)}${alreadyPaidOut ? ' — transporteur déjà payé' : ''} — booking ${bookingId || paymentIntentId}`,
+    html,
+  });
+}
+
 module.exports = {
   sendBookingConfirmation,
   sendNewBookingToCarrier,
@@ -579,4 +608,5 @@ module.exports = {
   sendDisputeOpened,
   sendModerationWarning,
   sendContentMismatchNotification,
+  sendChargebackAlert,
 };
