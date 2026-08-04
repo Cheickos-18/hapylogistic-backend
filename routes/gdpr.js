@@ -180,9 +180,16 @@ router.post('/delete-account', auth, async (req, res) => {
     // 8. Supprimer les notifications (pas de valeur comptable)
     await db.execute('DELETE FROM notifications WHERE user_id = ?', [userId]);
 
-    // 9. Invalider les sessions actives en blacklistant le token
-    // (si tu utilises un système de blacklist JWT — sinon le token expire naturellement)
-    // await db.execute('INSERT INTO token_blacklist (user_id, blacklisted_at) VALUES (?, NOW())', [userId]);
+    // 9. Invalider les sessions actives en blacklistant le compte
+    // CORRECTION : cette ligne était commentée — un token émis avant la
+    // suppression restait utilisable jusqu'à son expiration naturelle
+    // (jusqu'à 7 jours), malgré la demande d'effacement RGPD. Voir
+    // middleware/auth.js, qui vérifie désormais cette table à chaque
+    // requête authentifiée.
+    await db.execute(
+      'INSERT INTO token_blacklist (user_id) VALUES (?) ON DUPLICATE KEY UPDATE blacklisted_at = NOW()',
+      [userId]
+    );
 
     // 10. Log interne de la demande d'effacement (traçabilité RGPD obligatoire)
     // Tu peux aussi logger dans un fichier ou un service dédié
