@@ -169,6 +169,9 @@ router.get('/:bookingId/unread', auth, async (req, res) => {
     );
     res.json({ count: rows[0].count });
   } catch (err) {
+    // CORRECTION : catch totalement silencieux, aucun log — même défaut
+    // trouvé sur GET /auth/me et GET /:bookingId/unread ailleurs ce jour.
+    console.error('Erreur GET /messages/:bookingId/unread:', err.message);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
