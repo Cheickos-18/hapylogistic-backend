@@ -211,14 +211,42 @@ router.post('/stripe', async (req, res) => {
         break;
       }
 
-      // ── Chargeback détecté ──
+      // ── Chargeback détecté ──────────────────────────────────────────────
+      // CORRECTION : événement le plus urgent de tout le système de paiement
+      // (délai de réponse strict imposé par les réseaux de cartes ; si le
+      // transporteur a déjà été payé, HapyLogistic perd réellement l'argent
+      // en cas de chargeback perdu). Avant, cet événement se contentait d'un
+      // console.log et d'un changement de statut — personne n'était jamais
+      // prévenu. Toutes les autres alertes sensibles de ce fichier envoient
+      // un email ; celle-ci, la plus critique, n'envoyait rien à personne.
       case 'charge.dispute.created': {
         const dispute = event.data.object;
         console.log(`⚠️ Chargeback détecté: ${dispute.id} — montant: ${dispute.amount / 100} €`);
+
+        const [rows] = await db.execute(
+          'SELECT id, status FROM bookings WHERE payment_intent_id = ?',
+          [dispute.payment_intent]
+        );
+        const booking = rows[0] || null;
+
         await db.execute(
           "UPDATE bookings SET status = 'disputed' WHERE payment_intent_id = ?",
           [dispute.payment_intent]
         );
+
+        try {
+          await email.sendChargebackAlert({
+            bookingId: booking?.id || null,
+            bookingStatusBeforeChargeback: booking?.status || null,
+            paymentIntentId: dispute.payment_intent,
+            stripeDisputeId: dispute.id,
+            amount: dispute.amount / 100,
+            reason: dispute.reason,
+          });
+        } catch (emailErr) {
+          console.error('[EMAIL] sendChargebackAlert failed:', emailErr.message);
+        }
+
         break;
       }
 
