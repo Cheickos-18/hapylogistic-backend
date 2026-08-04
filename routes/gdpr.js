@@ -155,6 +155,16 @@ router.post('/delete-account', auth, async (req, res) => {
       WHERE client_id = ? OR carrier_id = ?
     `, [userId, userId]);
 
+    // 6bis. Désactiver les annonces actives du transporteur (le contrôle
+    // hasActiveBookings ci-dessus ne portait que sur les RÉSERVATIONS déjà
+    // en cours — une annonce active sans réservation ne bloquait donc pas
+    // la suppression, mais restait visible et réservable après coup,
+    // rattachée à un compte anonymisé "Utilisateur Supprimé" injoignable.
+    await db.execute(
+      "UPDATE listings SET status = 'inactive' WHERE carrier_id = ? AND status = 'active'",
+      [userId]
+    );
+
     // 7. Anonymiser les disputes (description personnelle supprimée)
     await db.execute(`
       UPDATE disputes SET
