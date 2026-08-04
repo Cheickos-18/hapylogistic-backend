@@ -20,9 +20,19 @@
 
 // ── 1. Coordonnées de contact (bloquant) ──────────────────────────────────────
 
-// Numéros de téléphone : au moins 6 chiffres consécutifs, séparateurs courants
-// tolérés (espace, point, tiret, parenthèses), avec ou sans indicatif pays.
-const PHONE_REGEX = /(?:\+?\d[\s.\-()]?){6,}\d/g;
+// CORRECTION : l'ancien regex bloquait TOUTE suite de 6+ chiffres consécutifs,
+// quelle que soit sa nature — testé et confirmé, il rejetait à tort des
+// messages parfaitement légitimes comme "Mon colis pèse 1234567 grammes" ou
+// "La réf commande est CMD1234567890", avec le message d'erreur trompeur
+// "ne partagez pas votre numéro de téléphone" alors qu'aucun numéro n'était
+// partagé. Remplacé par un regex ciblant la STRUCTURE réelle d'un numéro :
+//   - format national français (0 + 9 chiffres, ex: 06 12 34 56 78)
+//   - format international français (+33/0033 + 9 chiffres)
+//   - format international générique (+ suivi de 7 à 17 chiffres/séparateurs,
+//     pour couvrir les corridors diaspora hors France)
+// Un simple enchaînement de chiffres sans ce préfixe structurel (référence de
+// commande, poids, prix, code postal...) n'est plus intercepté.
+const PHONE_REGEX = /(?:\+33|0033)[\s.\-]?[1-9](?:[\s.\-]?\d{2}){4}|0[1-9](?:[\s.\-]?\d{2}){4}|\+[\d\s.\-()]{7,17}\d/g;
 
 // Emails : format standard
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
@@ -35,10 +45,11 @@ const SOCIAL_APP_REGEX = /\b(whatsapp|watsapp|whats app|telegram|signal|snapchat
 const HANDLE_REGEX = /@[a-zA-Z0-9_.]{3,}/g;
 
 function stripDigitsNoise(s) {
-  // Utilisé uniquement pour compter les chiffres "utiles" d'une correspondance
-  // potentielle de téléphone, afin d'écarter les faux positifs courts
-  // (ex: un numéro de rue "12" ou un code postal isolé de 5 chiffres ne
-  // matche déjà pas le regex à 6+ chiffres, mais on double-vérifie ici).
+  // Vérification de sécurité finale sur ce que le regex a effectivement
+  // trouvé : le format international générique (+ suivi de séparateurs)
+  // pourrait en théorie matcher une chaîne à très peu de vrais chiffres
+  // (ex: beaucoup d'espaces). On exige au moins 7 chiffres réels dans la
+  // correspondance avant de bloquer, quel que soit le motif qui a matché.
   return (s.match(/\d/g) || []).length;
 }
 
@@ -46,7 +57,7 @@ function detectContactInfo(text) {
   if (!text) return { blocked: false };
 
   const phoneMatches = text.match(PHONE_REGEX) || [];
-  const realPhone = phoneMatches.find(m => stripDigitsNoise(m) >= 6);
+  const realPhone = phoneMatches.find(m => stripDigitsNoise(m) >= 7);
   if (realPhone) {
     return {
       blocked: true,
