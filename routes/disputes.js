@@ -6,6 +6,13 @@ const auth    = require('../middleware/auth');
 const { stripe } = require('../services/stripe');
 
 // ── Helper : appliquer l'issue convenue d'un litige à la réservation ──
+// CORRECTION : cette fonction ne validait pas que pi.status était bien dans
+// l'un des deux états attendus avant de continuer — si Stripe renvoyait un
+// statut imprévu, aucune opération de paiement n'était effectuée, mais la
+// réservation était quand même marquée "refunded"/"completed" en base,
+// comme si tout s'était bien passé. On lève désormais une erreur explicite
+// dans ce cas, pour que l'appelant sache que l'opération n'a PAS réellement
+// abouti et n'inscrive rien de trompeur.
 async function applyDisputeOutcome(booking, outcome) {
   const pi = await stripe.paymentIntents.retrieve(booking.payment_intent_id);
   if (outcome === 'refunded') {
@@ -13,6 +20,8 @@ async function applyDisputeOutcome(booking, outcome) {
       await stripe.paymentIntents.cancel(booking.payment_intent_id);
     } else if (pi.status === 'succeeded') {
       await stripe.refunds.create({ payment_intent: booking.payment_intent_id, reason: 'requested_by_customer' });
+    } else {
+      throw new Error(`Statut de paiement Stripe inattendu pour un remboursement : ${pi.status}`);
     }
     await db.execute('UPDATE bookings SET status = ? WHERE id = ?', ['refunded', booking.id]);
     await db.execute(
@@ -23,6 +32,10 @@ async function applyDisputeOutcome(booking, outcome) {
     // 'completed' — livraison confirmée, le transporteur est payé
     if (pi.status === 'requires_capture') {
       await stripe.paymentIntents.capture(booking.payment_intent_id);
+    } else if (pi.status !== 'succeeded') {
+      // 'succeeded' est acceptable tel quel (déjà capturé via un autre
+      // chemin) ; tout autre statut (canceled, etc.) est anormal ici.
+      throw new Error(`Statut de paiement Stripe inattendu pour une confirmation de livraison : ${pi.status}`);
     }
     await db.execute(
       'UPDATE bookings SET status = ?, receipt_confirmed_at = NOW() WHERE id = ?',
@@ -251,22 +264,60 @@ router.post('/:id/resolve', auth, async (req, res) => {
 
     if (bothProposed) {
       if (outcomeClient === outcomeCarrier) {
-        // Accord !
-        bothAgreed = true;
-        newStatus  = 'resolved';
+        // ── CORRECTION : ne plus déclarer le litige résolu par avance ──
+        // Avant, `newStatus` passait à 'resolved' et le message "✅ Litige
+        // résolu" était ajouté à l'historique AVANT même de savoir si
+        // l'opération Stripe avait réussi. Si applyDisputeOutcome échouait
+        // (panne réseau, statut de paiement imprévu...), l'erreur était
+        // seulement journalisée côté serveur — le litige apparaissait
+        // quand même "résolu" aux deux parties, avec un message de succès
+        // trompeur, alors qu'aucun remboursement ni paiement n'avait
+        // réellement eu lieu. Le statut et le message ne sont désormais
+        // écrits qu'après confirmation que l'opération a bien abouti.
         const [bRows] = await db.execute('SELECT * FROM bookings WHERE id = ?', [dispute.booking_id]);
+        let outcomeApplied = false;
         if (bRows.length) {
           try {
             await applyDisputeOutcome(bRows[0], outcomeClient);
+            outcomeApplied = true;
           } catch (e) {
             console.error('Erreur applyDisputeOutcome:', e.message);
           }
         }
-        history.push({
-          role: 'system',
-          text: '✅ Litige résolu par accord mutuel — ' + outcomeLabel(outcomeClient) + '.',
-          ts: new Date().toISOString(),
-        });
+
+        if (outcomeApplied) {
+          bothAgreed = true;
+          newStatus  = 'resolved';
+          history.push({
+            role: 'system',
+            text: '✅ Litige résolu par accord mutuel — ' + outcomeLabel(outcomeClient) + '.',
+            ts: new Date().toISOString(),
+          });
+        } else {
+          // L'accord existe mais l'opération de paiement a échoué : on ne
+          // ment pas aux utilisateurs, et on prévient l'équipe support en
+          // conservant les propositions telles quelles (pas de conflit,
+          // juste un souci technique à traiter manuellement).
+          history.push({
+            role: 'system',
+            text: "⚠️ Accord trouvé mais le traitement du paiement a échoué techniquement. Notre équipe va intervenir manuellement — pas besoin de reproposer une résolution.",
+            ts: new Date().toISOString(),
+          });
+          await db.execute(
+            `UPDATE disputes
+             SET resolved_by_client = ?, resolved_by_carrier = ?,
+                 resolution_outcome_client = ?, resolution_outcome_carrier = ?,
+                 status = ?, resolution = ?, updated_at = NOW()
+             WHERE id = ?`,
+            [resolvedByClient, resolvedByCarrier, outcomeClient, outcomeCarrier, newStatus, JSON.stringify(history), dispute.id]
+          );
+          return res.status(502).json({
+            error: "Vos propositions concordent, mais une erreur technique a empêché le traitement du paiement. Notre équipe a été alertée et va intervenir manuellement — vous n'avez rien à refaire.",
+            bothAgreed: false,
+            conflict: false,
+            status: newStatus,
+          });
+        }
       } else {
         // Désaccord — réinitialiser pour permettre une nouvelle tentative
         conflict = true;
