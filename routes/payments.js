@@ -50,6 +50,31 @@ router.post('/intent', auth, async (req, res) => {
       return res.status(400).json({ error: `Max ${listing.available_kg} kg disponibles` });
     }
 
+    // ── CORRECTION CONCURRENCE : décrémentation atomique AVANT tout appel Stripe ──
+    // Le contrôle ci-dessus lit une valeur figée au moment de la requête. Entre
+    // cette lecture et la mise à jour, un appel réseau vers Stripe pouvait
+    // laisser une fenêtre de plusieurs centaines de ms pendant laquelle une
+    // deuxième réservation simultanée passait le même contrôle avec la même
+    // valeur non encore à jour — deux réservations pouvaient alors être
+    // acceptées pour plus de kg qu'il n'en restait réellement (available_kg
+    // finissant négatif). La clause WHERE available_kg >= ? rend cette
+    // opération atomique au niveau de MySQL : une seule des deux requêtes
+    // concurrentes peut réussir, l'autre échoue proprement (affectedRows = 0)
+    // sans jamais créer de Payment Intent ni de réservation.
+    const [kgResult] = await db.execute(
+      'UPDATE listings SET available_kg = available_kg - ? WHERE id = ? AND available_kg >= ?',
+      [parseFloat(weightKg), listingId, parseFloat(weightKg)]
+    );
+    if (kgResult.affectedRows === 0) {
+      return res.status(409).json({
+        error: "Cette capacité vient d'être réservée par un autre client — il ne reste plus assez de kg disponibles sur ce trajet. Veuillez réessayer ou choisir un autre transporteur.",
+      });
+    }
+    await db.execute(
+      "UPDATE listings SET status = 'inactive' WHERE id = ? AND available_kg <= 0",
+      [listingId]
+    );
+
     const [clients] = await db.execute('SELECT * FROM users WHERE id = ?', [req.user.id]);
     const client = clients[0];
 
@@ -77,59 +102,64 @@ router.post('/intent', auth, async (req, res) => {
         stripeCustomerId = null;
       }
     }
-    if (!stripeCustomerId) {
-      const newCustomer = await stripe.customers.create({
-        email: client.email || undefined,
-        name: `${client.first_name || ''} ${client.last_name || ''}`.trim() || undefined,
-        metadata: { userId: client.id },
-      });
-      stripeCustomerId = newCustomer.id;
-      await db.execute('UPDATE users SET stripe_customer_id = ? WHERE id = ?', [stripeCustomerId, client.id]);
+
+    let pi, bookingId, pickupCode;
+    try {
+      if (!stripeCustomerId) {
+        const newCustomer = await stripe.customers.create({
+          email: client.email || undefined,
+          name: `${client.first_name || ''} ${client.last_name || ''}`.trim() || undefined,
+          metadata: { userId: client.id },
+        });
+        stripeCustomerId = newCustomer.id;
+        await db.execute('UPDATE users SET stripe_customer_id = ? WHERE id = ?', [stripeCustomerId, client.id]);
+      }
+      piParams.customer = stripeCustomerId;
+
+      // ── CORRECTION FINALE : utiliser transfer_data[amount] = carrierNet
+      // Stripe transfère exactement carrierNet à Bay, la différence reste sur la plateforme.
+      // C'est l'approche documentée et fiable pour capture manuelle + Connect.
+      if (listing.stripe_account_id) {
+        piParams.transfer_data = {
+          destination: listing.stripe_account_id,
+          amount:      amounts.carrierNet,
+        };
+      }
+
+      pi = await stripe.paymentIntents.create(piParams);
+
+      pickupCode = generatePickupCode();
+      bookingId  = require('crypto').randomUUID();
+
+      await db.execute(`
+        INSERT INTO bookings
+          (id, listing_id, client_id, carrier_id, weight_kg, parcel_type,
+           recipient_name, recipient_phone, special_notes,
+           base_amount, client_fee, carrier_fee, client_total, carrier_net, platform_fee,
+           declared_value,
+           payment_intent_id, pickup_code, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_payment')
+      `, [
+        bookingId, listingId, req.user.id, listing.carrier_id,
+        parseFloat(weightKg), parcelType || null,
+        recipientName || null, recipientPhone || null, specialNotes,
+        base,
+        amounts.clientFee  / 100, amounts.carrierFee / 100,
+        amounts.clientTotal/ 100, amounts.carrierNet / 100, amounts.platformFee / 100,
+        declaredValueNum,
+        pi.id, pickupCode,
+      ]);
+    } catch (innerErr) {
+      // ── Restauration des kg si l'on a déjà décrémenté mais que la suite a échoué ──
+      // (erreur Stripe, insertion en base...) — sans ce filet, la capacité
+      // serait perdue pour rien : le transporteur en aurait moins de
+      // disponible sans qu'aucune réservation n'ait réellement abouti.
+      await db.execute(
+        'UPDATE listings SET available_kg = available_kg + ?, status = ? WHERE id = ?',
+        [parseFloat(weightKg), 'active', listingId]
+      );
+      throw innerErr;
     }
-    piParams.customer = stripeCustomerId;
-
-    // ── CORRECTION FINALE : utiliser transfer_data[amount] = carrierNet
-    // Stripe transfère exactement carrierNet à Bay, la différence reste sur la plateforme.
-    // C'est l'approche documentée et fiable pour capture manuelle + Connect.
-    if (listing.stripe_account_id) {
-      piParams.transfer_data = {
-        destination: listing.stripe_account_id,
-        amount:      amounts.carrierNet,
-      };
-    }
-
-    const pi = await stripe.paymentIntents.create(piParams);
-
-    const pickupCode = generatePickupCode();
-    const bookingId  = require('crypto').randomUUID();
-
-    await db.execute(`
-      INSERT INTO bookings
-        (id, listing_id, client_id, carrier_id, weight_kg, parcel_type,
-         recipient_name, recipient_phone, special_notes,
-         base_amount, client_fee, carrier_fee, client_total, carrier_net, platform_fee,
-         declared_value,
-         payment_intent_id, pickup_code, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_payment')
-    `, [
-      bookingId, listingId, req.user.id, listing.carrier_id,
-      parseFloat(weightKg), parcelType || null,
-      recipientName || null, recipientPhone || null, specialNotes,
-      base,
-      amounts.clientFee  / 100, amounts.carrierFee / 100,
-      amounts.clientTotal/ 100, amounts.carrierNet / 100, amounts.platformFee / 100,
-      declaredValueNum,
-      pi.id, pickupCode,
-    ]);
-
-    await db.execute(
-      'UPDATE listings SET available_kg = available_kg - ? WHERE id = ?',
-      [parseFloat(weightKg), listingId]
-    );
-    await db.execute(
-      "UPDATE listings SET status = 'inactive' WHERE id = ? AND available_kg <= 0",
-      [listingId]
-    );
 
     res.json({
       success: true,
