@@ -58,9 +58,23 @@ router.post('/flagged-messages/:id/resolve', auth, requireAdmin, async (req, res
   const action = req.body?.action === 'confirm' ? 'confirm' : 'dismiss';
 
   try {
-    const [rows] = await db.execute('SELECT id, sender_id FROM messages WHERE id = ?', [req.params.id]);
+    // CORRECTION : ajout de reviewed_at à la sélection + vérification qu'il
+    // n'est pas déjà rempli. Avant, rien n'empêchait de traiter deux fois le
+    // même message (double-clic, deux onglets admin ouverts...) — chaque
+    // appel avec action='confirm' réincrémentait confirmed_flags_count et
+    // renvoyait un nouvel email d'avertissement à l'expéditeur, gonflant
+    // artificiellement son compteur pour un seul et même incident, alors
+    // que ce compteur peut mener à une suspension.
+    const [rows] = await db.execute('SELECT id, sender_id, reviewed_at FROM messages WHERE id = ?', [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Message introuvable' });
     const message = rows[0];
+
+    if (message.reviewed_at) {
+      return res.status(409).json({
+        error: 'Ce message a déjà été traité — aucune action supplémentaire effectuée.',
+        code: 'ALREADY_REVIEWED',
+      });
+    }
 
     await db.execute(
       'UPDATE messages SET reviewed_at = NOW(), reviewed_by = ?, action_taken = ? WHERE id = ?',
