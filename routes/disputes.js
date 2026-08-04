@@ -191,6 +191,23 @@ router.post('/:id/respond', auth, async (req, res) => {
       [JSON.stringify(history), dispute.id]
     );
 
+    // ── Notifier l'autre partie ────────────────────────────────
+    // Non bloquant : un échec ici ne doit jamais faire échouer l'envoi du
+    // message lui-même (déjà enregistré avec succès ci-dessus).
+    try {
+      const [senders] = await db.execute('SELECT first_name FROM users WHERE id = ?', [req.user.id]);
+      const senderName = senders[0]?.first_name || 'Quelqu\'un';
+      const otherPartyId = senderRole === 'client' ? dispute.carrier_id : dispute.client_id;
+      const notifId = require('crypto').randomUUID();
+      await db.execute(
+        `INSERT INTO notifications (id, user_id, type, title, message)
+         VALUES (?, ?, 'dispute', ?, ?)`,
+        [notifId, otherPartyId, `Nouveau message de ${senderName} dans un litige`, message.trim().slice(0, 100)]
+      );
+    } catch (notifErr) {
+      console.error('Erreur notification dispute/respond:', notifErr.message);
+    }
+
     res.json({ success: true, message: 'Réponse enregistrée', history });
   } catch (err) {
     console.error('Erreur POST /disputes/:id/respond:', err.message);
@@ -226,6 +243,23 @@ router.post('/:id/resolve', auth, async (req, res) => {
     }
 
     const isClient = dispute.client_id === req.user.id;
+    const otherPartyId = isClient ? dispute.carrier_id : dispute.client_id;
+
+    // ── Petit utilitaire pour notifier l'autre partie, non bloquant ──
+    // (un échec de notification ne doit jamais faire échouer la résolution
+    // du litige elle-même, qui est l'action principale de cette route)
+    const notifyOtherParty = async (title, message) => {
+      try {
+        const notifId = require('crypto').randomUUID();
+        await db.execute(
+          `INSERT INTO notifications (id, user_id, type, title, message)
+           VALUES (?, ?, 'dispute', ?, ?)`,
+          [notifId, otherPartyId, title, message]
+        );
+      } catch (notifErr) {
+        console.error('Erreur notification dispute/resolve:', notifErr.message);
+      }
+    };
 
     if (isClient && dispute.resolution_outcome_client) {
       return res.status(400).json({ error: 'Vous avez déjà proposé une issue pour ce litige' });
@@ -293,6 +327,10 @@ router.post('/:id/resolve', auth, async (req, res) => {
             text: '✅ Litige résolu par accord mutuel — ' + outcomeLabel(outcomeClient) + '.',
             ts: new Date().toISOString(),
           });
+          await notifyOtherParty(
+            'Litige résolu',
+            `Accord trouvé : ${outcomeLabel(outcomeClient)}.`
+          );
         } else {
           // L'accord existe mais l'opération de paiement a échoué : on ne
           // ment pas aux utilisateurs, et on prévient l'équipe support en
@@ -310,6 +348,10 @@ router.post('/:id/resolve', auth, async (req, res) => {
                  status = ?, resolution = ?, updated_at = NOW()
              WHERE id = ?`,
             [resolvedByClient, resolvedByCarrier, outcomeClient, outcomeCarrier, newStatus, JSON.stringify(history), dispute.id]
+          );
+          await notifyOtherParty(
+            'Problème technique sur un litige',
+            "Vos deux propositions concordaient mais une erreur technique a empêché le traitement du paiement. Notre équipe va intervenir manuellement."
           );
           return res.status(502).json({
             error: "Vos propositions concordent, mais une erreur technique a empêché le traitement du paiement. Notre équipe a été alertée et va intervenir manuellement — vous n'avez rien à refaire.",
@@ -330,7 +372,17 @@ router.post('/:id/resolve', auth, async (req, res) => {
           text: '⚠️ Vos propositions de résolution diffèrent. Discutez puis proposez une nouvelle résolution.',
           ts: new Date().toISOString(),
         });
+        await notifyOtherParty(
+          'Vos propositions de résolution diffèrent',
+          'Le litige reste ouvert — discutez puis reproposez une résolution.'
+        );
       }
+    } else {
+      // Une seule des deux parties a proposé une issue pour l'instant.
+      await notifyOtherParty(
+        `${isClient ? 'Le client' : 'Le transporteur'} a proposé une résolution de litige`,
+        `Proposition : ${outcomeLabel(outcome)}. Rendez-vous sur le litige pour répondre.`
+      );
     }
 
     await db.execute(
